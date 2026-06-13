@@ -178,19 +178,25 @@ function buildPlan(pointers, opts) {
       createdContainer = true;
     }
 
-    // cliSessionIds already present in the target container must not be copied
-    // again, otherwise the same conversation would appear twice.
-    const presentCli = new Set(
+    // A conversation must be copied at most once. Skip any cliSessionId that is
+    // already in the target container, and de-duplicate across multiple source
+    // workspaces so the same conversation never appears twice. Pointers with no
+    // cliSessionId are always kept (we can't tell them apart, so we don't drop).
+    const seenCli = new Set(
       list.filter((p) => p.containerPath === targetContainerPath).map((p) => p.cliSessionId)
     );
-    const toMigrate = list.filter(
-      (p) => p.containerPath !== targetContainerPath && !presentCli.has(p.cliSessionId)
-    );
+    const alreadyThere = seenCli.size;
+    const toMigrate = [];
+    for (const p of list) {
+      if (p.containerPath === targetContainerPath) continue;
+      if (p.cliSessionId && seenCli.has(p.cliSessionId)) continue;
+      if (p.cliSessionId) seenCli.add(p.cliSessionId);
+      toMigrate.push(p);
+    }
 
-    if (toMigrate.length === 0 && !createdContainer) continue;
     if (toMigrate.length === 0) continue;
 
-    groups.push({ cwd, targetContainerPath, createdContainer, toMigrate, alreadyThere: presentCli.size });
+    groups.push({ cwd, targetContainerPath, createdContainer, toMigrate, alreadyThere });
   }
   return { groups, targetWorkspace };
 }

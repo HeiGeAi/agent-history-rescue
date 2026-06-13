@@ -8,13 +8,31 @@
 ![platform](https://img.shields.io/badge/platform-macOS%20%7C%20Windows%20%7C%20Linux-lightgrey.svg)
 ![deps](https://img.shields.io/badge/dependencies-0-success.svg)
 
-**Claude Code 历史救援 · 换账号后找回"消失"的对话 | Rescue your Claude Code history after switching accounts**
+**Claude Code 历史救援 · 换账号后找回"消失"的对话 | Recover Claude Code history that disappeared after switching accounts**
 
 对话没丢，只是被新账号藏起来了。这个工具把它们接回你当前账号的桌面端。
+Your conversations are not deleted. This tool brings them back into your current desktop app.
 
-[这是什么](#这是什么-what-is-this) • [为什么会消失](#为什么会消失-why-it-happens) • [快速开始](#快速开始-quick-start) • [用法](#用法-usage) • [安全设计](#安全设计-how-it-stays-safe) • [排障](#排障-troubleshooting) • [English](#english)
+[症状](#你是否遇到这些-symptoms) • [这是什么](#这是什么-what-is-this) • [为什么会消失](#为什么会消失-why-it-happens) • [快速开始](#快速开始-quick-start) • [用法](#用法-usage) • [安全设计](#安全设计-how-it-stays-safe) • [常见问题](#常见问题-faq) • [English](#english)
 
 </div>
+
+---
+
+## 你是否遇到这些 Symptoms
+
+如果你正在搜下面任意一种情况，这个工具就是为你做的。**你的对话没有被删，只是被账号隔离藏起来了。**
+
+- 换了 Claude 账号后，Claude Code 的历史对话**全没了**
+- 升级或重装 Claude 桌面端之后，Recents（最近对话）**变成空的**
+- 桌面端只剩**换账号之后**的新对话，之前几百条全不见
+- `claude --resume` 列表里**翻不到以前的会话**
+- 想**恢复 / 找回** Claude Code 的聊天记录，但不知道文件在哪
+
+> In English, people hit this as: *"Claude Code history disappeared after switching accounts"*,
+> *"Claude desktop Recents empty after update or reinstall"*, *"Claude Code conversations
+> missing / gone"*, *"claude --resume not showing old sessions"*, *"how to recover or restore
+> Claude Code chat history"*. If that's you, read on.
 
 ---
 
@@ -144,6 +162,28 @@ npx -y github:HeiGeAi/claude-history-rescue          # 备份 + 迁移
 
 ---
 
+## 常见问题 FAQ
+
+**换账号会删掉我的 Claude Code 历史吗？**
+不会。真正的对话内容是本地文件，存在 `~/.claude/projects/`，换账号、重装、升级都不会删它。消失的只是桌面端那份按账号隔离的索引。
+
+**Claude Code 的对话到底存在哪？**
+两个地方：对话本体在 `~/.claude/projects/<项目>/<id>.jsonl`（不绑账号）；桌面端 Recents 的索引在 `claude-code-sessions/<workspace>/`（按账号隔离）。
+
+**换账号后怎么把历史找回来？**
+退出桌面端，跑 `npx -y github:HeiGeAi/claude-history-rescue`，它会把旧账号的对话指针复制进你当前账号，重启桌面端即可。
+
+**升级或重装桌面端后 Recents 空了，也能修吗？**
+能。根因一样（workspace 索引和你当前账号对不上），同一个工具同样适用。
+
+**安全吗？会不会弄坏我的数据？**
+操作前自动整目录备份、只复制不删除不覆盖、检测到桌面端运行就拒绝、可一键回滚。源码就一个文件，可自审。
+
+**我只想在终端读旧对话，不用桌面端呢？**
+不需要本工具。`cd <你的项目> && claude --resume` 选会话即可。
+
+---
+
 ## English
 
 Switched accounts, reinstalled, or upgraded the Claude desktop app and your Claude Code
@@ -180,6 +220,19 @@ npx -y github:HeiGeAi/claude-history-rescue --restore <backupDir>
 refuses to run while the app is open, is idempotent, and rolls back with one command. Zero
 dependencies, all in one auditable file. Use at your own risk and keep the backup until you've
 confirmed your history is back.
+
+**FAQ**
+
+- **Did switching accounts delete my Claude Code history?** No. Transcripts live in
+  `~/.claude/projects/` and are never tied to an account.
+- **Where are Claude Code conversations stored?** Transcripts in
+  `~/.claude/projects/<project>/<id>.jsonl`; the desktop Recents index in
+  `claude-code-sessions/<workspace>/` (per account).
+- **How do I get my history back after switching accounts?** Quit the desktop app and run
+  `npx -y github:HeiGeAi/claude-history-rescue`.
+- **Does it also fix an empty Recents after a reinstall or upgrade?** Yes, same root cause,
+  same fix.
+- **Is it safe?** Backs up first, only copies, never deletes, one-command rollback.
 
 ---
 
