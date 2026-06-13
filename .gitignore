@@ -1,0 +1,11 @@
+# dependencies (this project has none, but just in case)
+node_modules/
+package-lock.json
+
+# OS noise
+.DS_Store
+Thumbs.db
+
+# the tool's own backups, in case anyone runs it from inside the repo
+.claude-history-rescue/
+*-backup-*/

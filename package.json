@@ -1,0 +1,40 @@
+{
+  "name": "claude-history-rescue",
+  "version": "1.0.0",
+  "description": "Bring back Claude Code conversations that vanished from the desktop app after switching accounts, reinstalling, or upgrading. Zero dependencies, backup-first, never deletes.",
+  "bin": {
+    "claude-history-rescue": "bin/claude-history-rescue.js"
+  },
+  "scripts": {
+    "start": "node bin/claude-history-rescue.js"
+  },
+  "keywords": [
+    "claude",
+    "claude-code",
+    "claude-desktop",
+    "history",
+    "sessions",
+    "recover",
+    "migrate",
+    "backup",
+    "cli"
+  ],
+  "author": "HeiGeAi (Blake Xu) (https://github.com/HeiGeAi)",
+  "license": "MIT",
+  "homepage": "https://github.com/HeiGeAi/claude-history-rescue#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/HeiGeAi/claude-history-rescue.git"
+  },
+  "bugs": {
+    "url": "https://github.com/HeiGeAi/claude-history-rescue/issues"
+  },
+  "engines": {
+    "node": ">=16"
+  },
+  "files": [
+    "bin",
+    "README.md",
+    "LICENSE"
+  ]
+}
