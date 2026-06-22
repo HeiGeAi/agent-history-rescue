@@ -1,17 +1,19 @@
 {
-  "name": "claude-history-rescue",
-  "version": "1.0.0",
-  "description": "Bring back Claude Code conversations that vanished from the desktop app after switching accounts, reinstalling, or upgrading. Zero dependencies, backup-first, never deletes.",
+  "name": "agent-history-rescue",
+  "version": "2.0.0",
+  "description": "Recover coding-agent conversations that vanished after switching accounts, providers, reinstalling, or upgrading. Supports Claude Code and Codex. Backup-first, never deletes, one-command rollback.",
   "bin": {
-    "claude-history-rescue": "bin/claude-history-rescue.js"
+    "agent-history-rescue": "bin/agent-history-rescue.js"
   },
   "scripts": {
-    "start": "node bin/claude-history-rescue.js"
+    "start": "node bin/agent-history-rescue.js"
   },
   "keywords": [
     "claude",
     "claude-code",
     "claude-desktop",
+    "codex",
+    "openai-codex",
     "history",
     "sessions",
     "recover",
@@ -21,19 +23,20 @@
   ],
   "author": "HeiGeAi (Blake Xu) (https://github.com/HeiGeAi)",
   "license": "MIT",
-  "homepage": "https://github.com/HeiGeAi/claude-history-rescue#readme",
+  "homepage": "https://github.com/HeiGeAi/agent-history-rescue#readme",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/HeiGeAi/claude-history-rescue.git"
+    "url": "git+https://github.com/HeiGeAi/agent-history-rescue.git"
   },
   "bugs": {
-    "url": "https://github.com/HeiGeAi/claude-history-rescue/issues"
+    "url": "https://github.com/HeiGeAi/agent-history-rescue/issues"
   },
   "engines": {
     "node": ">=16"
   },
   "files": [
     "bin",
+    "scripts",
     "README.md",
     "LICENSE"
   ]
