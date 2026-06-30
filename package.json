@@ -1,7 +1,7 @@
 {
   "name": "agent-history-rescue",
-  "version": "2.0.0",
-  "description": "Recover coding-agent conversations that vanished after switching accounts, providers, reinstalling, or upgrading. Supports Claude Code and Codex. Backup-first, never deletes, one-command rollback.",
+  "version": "3.0.0",
+  "description": "Recover coding-agent conversations that vanished after switching accounts, providers, reinstalling, or upgrading, or rebuild them from an exported data archive (e.g. after a ban). Supports Claude Code and Codex. Backup-first, never deletes, one-command rollback.",
   "bin": {
     "agent-history-rescue": "bin/agent-history-rescue.js"
   },
@@ -19,7 +19,11 @@
     "recover",
     "migrate",
     "backup",
-    "cli"
+    "cli",
+    "data-export",
+    "import",
+    "account-ban",
+    "conversation-export"
   ],
   "author": "HeiGeAi (Blake Xu) (https://github.com/HeiGeAi)",
   "license": "MIT",

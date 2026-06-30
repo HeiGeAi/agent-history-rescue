@@ -421,6 +421,377 @@ async function runCodex(argv) {
 }
 
 // ===========================================================================
+// IMPORT backend: recover from an exported data archive (e.g. after a ban)
+// ===========================================================================
+// Turns an official Claude data export (the zip you get from "Export data")
+// into three things: a human/agent-readable archive, restored Claude Code
+// conversations, and restored Codex conversations. Everything is local; nothing
+// is ever uploaded.
+
+function slugify(s, n = 48) {
+  return (s || '').replace(/[\/\\:*?"<>| .-]/g, ' ').replace(/\s+/g, '-')
+    .replace(/^[-.]+|-+$/g, '').slice(0, n).replace(/^[-.]+/, '') || 'untitled';
+}
+function pad4(i) { return String(i).padStart(4, '0'); }
+
+// Temp paths to best-effort clean up, including on Ctrl-C (they may hold content).
+const _tempPaths = new Set();
+function cleanupTemps() { for (const p of _tempPaths) { try { fs.rmSync(p, { recursive: true, force: true }); } catch { /* ignore */ } } }
+process.on('SIGINT', () => { cleanupTemps(); process.exit(130); });
+process.on('SIGTERM', () => { cleanupTemps(); process.exit(143); });
+
+function extractZip(zipPath, destDir) {
+  fs.mkdirSync(destDir, { recursive: true });
+  let r = spawnSync('unzip', ['-oq', zipPath, '-d', destDir], { stdio: 'ignore' });
+  if (r.status === 0) return true;
+  r = spawnSync('tar', ['-xf', zipPath, '-C', destDir], { stdio: 'ignore' });
+  if (r.status === 0) return true;
+  if (process.platform === 'win32') {
+    const z = zipPath.replace(/'/g, "''"), d = destDir.replace(/'/g, "''");
+    r = spawnSync('powershell', ['-NoProfile', '-Command',
+      `Expand-Archive -LiteralPath '${z}' -DestinationPath '${d}' -Force`], { stdio: 'ignore' });
+    if (r.status === 0) return true;
+  }
+  return false;
+}
+
+// Find the directory that actually holds conversations.json (bounded recursive search).
+function findExportRoot(dir, depth = 3) {
+  if (fs.existsSync(path.join(dir, 'conversations.json'))) return dir;
+  if (depth <= 0) return null;
+  for (const e of safeReaddir(dir)) {
+    if (e === '__MACOSX') continue;
+    const p = path.join(dir, e);
+    if (isDir(p)) { const found = findExportRoot(p, depth - 1); if (found) return found; }
+  }
+  return null;
+}
+
+function convFromWeb(item) {
+  const messages = [];
+  for (const m of item.chat_messages || []) {
+    if (!m) continue;
+    const role = m.sender === 'human' ? 'user' : 'assistant';
+    let text = m.text || '';
+    if ((!text || !text.trim()) && Array.isArray(m.content)) {
+      text = m.content.map((c) => c && c.text).filter(Boolean).join('\n\n');
+    }
+    messages.push({ role, text, timestamp: m.created_at || item.created_at });
+  }
+  return {
+    id: item.uuid, title: item.name || '(untitled)', createdAt: item.created_at,
+    updatedAt: item.updated_at, summary: item.summary || '', source: 'claude-web', messages,
+  };
+}
+function convFromDesign(d) {
+  const messages = [];
+  for (const m of d.messages || []) {
+    if (!m) continue;
+    const c = (m && m.content) || {};
+    const role = (m.role || c.role) === 'human' ? 'user' : 'assistant';
+    const text = (typeof c.content === 'string') ? c.content : (m.text || '');
+    messages.push({ role, text, timestamp: m.created_at || d.created_at });
+  }
+  return {
+    id: d.uuid, title: d.title || '(untitled)', createdAt: d.created_at,
+    updatedAt: d.updated_at, summary: '', source: 'claude-artifacts', messages,
+  };
+}
+
+function parseClaudeExport(root) {
+  const model = { conversations: [], projects: [], memory: null };
+  const conv = readJson(path.join(root, 'conversations.json'));
+  if (Array.isArray(conv)) for (const it of conv) model.conversations.push(convFromWeb(it));
+  const dcDir = path.join(root, 'design_chats');
+  if (isDir(dcDir)) {
+    for (const f of safeReaddir(dcDir)) {
+      if (!f.endsWith('.json')) continue;
+      const d = readJson(path.join(dcDir, f));
+      if (d && Array.isArray(d.messages) && d.messages.length) model.conversations.push(convFromDesign(d));
+    }
+  }
+  const pjDir = path.join(root, 'projects');
+  if (isDir(pjDir)) {
+    for (const f of safeReaddir(pjDir)) {
+      if (!f.endsWith('.json')) continue;
+      const p = readJson(path.join(pjDir, f));
+      if (p) model.projects.push(p);
+    }
+  }
+  const mem = readJson(path.join(root, 'memories.json'));
+  if (Array.isArray(mem) && mem.length) model.memory = mem[0];
+  // Sort conversations oldest-first for stable numbering.
+  model.conversations.sort((a, b) => String(a.createdAt || '').localeCompare(String(b.createdAt || '')));
+  return model;
+}
+
+function conversationToMarkdown(conv) {
+  const out = [`# ${conv.title}`, ''];
+  out.push(`- source: ${conv.source}`);
+  if (conv.createdAt) out.push(`- created: ${conv.createdAt}`);
+  if (conv.updatedAt) out.push(`- updated: ${conv.updatedAt}`);
+  out.push(`- id: ${conv.id}`, '');
+  if (conv.summary) out.push(`> ${conv.summary.replace(/\n/g, ' ')}`, '');
+  out.push('---', '');
+  for (const m of conv.messages) {
+    const who = m.role === 'user' ? '🧑 User' : '🤖 Assistant';
+    const ts = m.timestamp ? `  _(${m.timestamp})_` : '';
+    out.push(`## ${who}${ts}`, '', (m.text || '').trim() || '_(empty)_', '');
+  }
+  return out.join('\n');
+}
+
+function writeAgentArchive(model, outDir) {
+  // The archive holds full conversation content, so keep it owner-only.
+  const F = { mode: 0o600 };
+  const convDir = path.join(outDir, 'conversations');
+  fs.mkdirSync(convDir, { recursive: true, mode: 0o700 });
+  const indexLines = [];
+  const jsonl = [];
+  model.conversations.forEach((conv, i) => {
+    const base = `${pad4(i + 1)}-${slugify(conv.title)}.md`;
+    fs.writeFileSync(path.join(convDir, base), conversationToMarkdown(conv), F);
+    indexLines.push(`- [${conv.title}](conversations/${base})  _(${conv.source}, ${conv.messages.length} msgs)_`);
+    jsonl.push(JSON.stringify(conv));
+  });
+  fs.writeFileSync(path.join(outDir, 'conversations.jsonl'), jsonl.join('\n') + '\n', F);
+  // Projects and memory, for reference.
+  if (model.projects.length) {
+    const pdir = path.join(outDir, 'projects');
+    fs.mkdirSync(pdir, { recursive: true, mode: 0o700 });
+    model.projects.forEach((p, i) => {
+      const lines = [`# ${p.name || 'project'}`, '', p.description || '', ''];
+      for (const doc of p.docs || []) lines.push(`## ${doc.filename || 'doc'}`, '', doc.content || '', '');
+      fs.writeFileSync(path.join(pdir, `${pad4(i + 1)}-${slugify(p.name || p.uuid)}.md`), lines.join('\n'), F);
+    });
+  }
+  if (model.memory) {
+    const lines = ['# Memory', '', model.memory.conversations_memory || ''];
+    for (const [k, v] of Object.entries(model.memory.project_memories || {})) lines.push('', `## project ${k}`, '', String(v));
+    fs.writeFileSync(path.join(outDir, 'memory.md'), lines.join('\n'), F);
+  }
+  const readme = [
+    '# Recovered conversation archive',
+    '',
+    `Recovered by agent-history-rescue. ${model.conversations.length} conversation(s).`,
+    '',
+    'Point any AI agent (or yourself) at this folder to read the full history.',
+    'Machine-readable copy: `conversations.jsonl` (one conversation per line).',
+    '',
+    '## Conversations',
+    ...indexLines,
+  ];
+  fs.writeFileSync(path.join(outDir, 'README.md'), readme.join('\n'), F);
+  return model.conversations.length;
+}
+
+// Build a Claude Code transcript (resumable jsonl) from a normalized conversation.
+function conversationToClaudeTranscript(conv, sessionId, cwd) {
+  const lines = [];
+  const nowIso = (t) => {
+    for (const cand of [t, conv.createdAt]) {
+      if (cand) { const d = new Date(cand); if (Number.isFinite(d.getTime())) return d.toISOString(); }
+    }
+    return new Date().toISOString();
+  };
+  lines.push({ type: 'ai-title', aiTitle: conv.title, sessionId });
+  let parent = null;
+  for (const m of conv.messages) {
+    const uuid = crypto.randomUUID();
+    const base = {
+      parentUuid: parent, isSidechain: false, uuid, timestamp: nowIso(m.timestamp),
+      sessionId, cwd, version: 'recovered', gitBranch: '', userType: 'external',
+    };
+    if (m.role === 'user') {
+      lines.push({ ...base, type: 'user', message: { role: 'user', content: m.text || '' } });
+    } else {
+      lines.push({
+        ...base, type: 'assistant',
+        message: {
+          model: 'claude-recovered', id: `msg_${uuid.replace(/-/g, '').slice(0, 20)}`, type: 'message',
+          role: 'assistant', content: [{ type: 'text', text: m.text || '' }], stop_reason: 'end_turn',
+        },
+      });
+    }
+    parent = uuid;
+  }
+  return lines.map((l) => JSON.stringify(l)).join('\n') + '\n';
+}
+
+async function restoreToClaude(conversations, flags) {
+  const cwd = path.join(os.homedir(), 'recovered-claude-history');
+  const projectDir = path.join(os.homedir(), '.claude', 'projects', encodeCwd(cwd));
+  const sessionsDir = sessionsDirFrom(defaultClaudeDir());
+  const pointers = scanPointers(sessionsDir);
+  let targetContainer = null;
+  if (pointers.length) {
+    const recent = pointers.reduce((a, b) => (b.lastActivityAt > a.lastActivityAt ? b : a));
+    targetContainer = recent.containerPath;
+  }
+  log(bold('\nRestore into Claude Code'));
+  log(`  ${conversations.length} conversation(s) -> ${dim(projectDir)}`);
+  log(targetContainer
+    ? `  desktop Recents pointers -> current workspace`
+    : yellow('  no Claude desktop workspace found; transcripts are written but open the Claude app once to list them.'));
+  if (flags.dryRun) { log(yellow('  (dry run: nothing written)')); return; }
+  const running = isClaudeRunning();
+  if (running === true && !flags.force) fail('The Claude desktop app is running. Quit it, then re-run (or pass --force).');
+  else if (running === null) log(yellow('  Could not verify whether Claude is running; make sure it is fully quit.'));
+
+  // Conversation ids come from an untrusted export; only use clean tokens as
+  // filenames. For a bad id, derive a deterministic id from content (not random),
+  // so re-running stays idempotent.
+  const safeId = (conv) => {
+    const raw = conv.id || '';
+    if (/^[A-Za-z0-9._-]+$/.test(raw) && raw !== '.' && raw !== '..') return raw;
+    return crypto.createHash('sha1').update(`${raw}|${conv.title || ''}|${conv.createdAt || ''}`).digest('hex');
+  };
+  const toMs = (v, fallback) => { const d = new Date(v); return Number.isFinite(d.getTime()) ? d.getTime() : fallback; };
+
+  fs.mkdirSync(cwd, { recursive: true });
+  fs.mkdirSync(projectDir, { recursive: true });
+  let backup = null;
+  if (targetContainer && fs.existsSync(sessionsDir)) backup = backupSessions(sessionsDir);
+  // Existing pointers for this cwd, so a re-run does not duplicate conversations.
+  const existingCli = new Set(scanPointers(sessionsDir).filter((p) => p.cwd === cwd).map((p) => p.cliSessionId));
+  let n = 0, skipped = 0;
+  for (const conv of conversations) {
+    // Deterministic session id from the export's conversation uuid -> idempotent.
+    const sessionId = safeId(conv);
+    const transcriptPath = path.join(projectDir, `${sessionId}.jsonl`);
+    const already = fs.existsSync(transcriptPath) || existingCli.has(sessionId);
+    if (already) { skipped++; continue; }
+    fs.writeFileSync(transcriptPath, conversationToClaudeTranscript(conv, sessionId, cwd));
+    if (targetContainer) {
+      const ms = toMs(conv.updatedAt, Date.now());
+      const pointer = {
+        sessionId: `local_${crypto.randomUUID()}`, cliSessionId: sessionId, cwd, originCwd: cwd,
+        lastFocusedAt: ms, createdAt: toMs(conv.createdAt, ms), lastActivityAt: ms,
+        model: 'claude-recovered', isArchived: false, title: conv.title, titleSource: 'auto',
+      };
+      fs.writeFileSync(path.join(targetContainer, `${pointer.sessionId}.json`), JSON.stringify(pointer));
+    }
+    n++;
+  }
+  log(green(`  Done. Wrote ${n} conversation(s) into Claude Code.`) + (skipped ? dim(`  (${skipped} already imported, skipped)`) : ''));
+  if (backup) log(dim(`  Workspace backup: ${backup}  (claude --restore to roll back the pointers)`));
+  log(dim(`  Recovered project lives at ${projectDir}`));
+  log(dim(`  and ${cwd}; delete both to remove the recovered conversations.`));
+  log(dim('  Open Claude Code, the recovered project shows up in Recents.'));
+}
+
+async function restoreToCodex(conversations, flags) {
+  const py = pythonCmd();
+  if (!py) fail('python3 was not found. Codex import needs Python 3.8+ in your PATH.');
+  const script = path.join(__dirname, '..', 'scripts', 'import_to_codex.py');
+  if (!fs.existsSync(script)) fail(`Bundled Codex import script is missing: ${script}`);
+  const job = {
+    codexHome: flags.codexHome || codexHome(),
+    defaultProvider: flags.codexProvider || null, // null -> Python infers the current sidebar provider
+    cwd: path.join(os.homedir(), 'recovered-codex-history'),
+    conversations,
+  };
+  // The job file holds full conversation content; keep it owner-only in a private
+  // temp dir, and register it for cleanup even on Ctrl-C.
+  const jobDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ahr-codex-'));
+  _tempPaths.add(jobDir);
+  const jobPath = path.join(jobDir, 'job.json');
+  fs.writeFileSync(jobPath, JSON.stringify(job), { mode: 0o600 });
+  try {
+    log(bold('\nRestore into Codex'));
+    if (flags.dryRun) { runPython(py, [script, jobPath]); return; }
+    const running = isCodexRunning();
+    if (running === true && !flags.force) fail('The Codex desktop app is running. Quit it, then re-run (or pass --force).');
+    else if (running === null) log(yellow('Could not verify whether Codex is running; make sure it is fully quit.'));
+    runPython(py, [script, jobPath, '--apply']);
+  } finally {
+    try { fs.rmSync(jobDir, { recursive: true, force: true }); } catch { /* ignore */ }
+    _tempPaths.delete(jobDir);
+  }
+}
+
+async function runImport(argv) {
+  const f = { src: null, to: [], out: null, dryRun: false, yes: false, force: false, noArchive: false, codexProvider: null, codexHome: null };
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i];
+    if (a === '--to') { const v = argv[++i]; if (v === 'all') f.to = ['claude', 'codex']; else f.to.push(v); }
+    else if (a === '--out') f.out = argv[++i];
+    else if (a === '--dry-run' || a === '-n') f.dryRun = true;
+    else if (a === '--yes' || a === '-y') f.yes = true;
+    else if (a === '--force') f.force = true;
+    else if (a === '--no-archive') f.noArchive = true;
+    else if (a === '--codex-provider') f.codexProvider = argv[++i];
+    else if (a === '--codex-home') f.codexHome = argv[++i];
+    else if (a === '--help' || a === '-h') { printImportHelp(); return; }
+    else if (!a.startsWith('-') && !f.src) f.src = a;
+    else fail(`Unknown import option: ${a}  (try: agent-history-rescue import --help)`);
+  }
+  if (!f.src) fail('Give the path to your export .zip (or its extracted folder).\n  agent-history-rescue import <export.zip> [--to claude|codex|all]');
+  if (!fs.existsSync(f.src)) fail(`Not found: ${f.src}`);
+
+  // Resolve a directory holding the export (extract the zip if needed).
+  let workDir = f.src;
+  let tempDir = null;
+  if (!isDir(f.src)) {
+    tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ahr-import-'));
+    _tempPaths.add(tempDir);
+    log(dim('Extracting export archive...'));
+    if (!extractZip(f.src, tempDir)) fail('Could not extract the zip. Install `unzip`, or extract it yourself and pass the folder.');
+    workDir = tempDir;
+  }
+  try {
+    const root = findExportRoot(workDir);
+    if (!root) fail('This does not look like a Claude data export (no conversations.json found).');
+    const model = parseClaudeExport(root);
+    log(green(`Parsed export:`) + ` ${model.conversations.length} conversation(s), ${model.projects.length} project(s).`);
+    if (model.conversations.length === 0) fail('No conversations found in the export.');
+
+    if (!f.noArchive) {
+      const outDir = f.out || path.join(os.homedir(), 'agent-history-rescue', 'imported', new Date().toISOString().replace(/[:.]/g, '-'));
+      if (f.dryRun) {
+        log(bold('\nAgent-readable archive') + dim(`  -> ${outDir}  (dry run: not written)`));
+      } else {
+        fs.mkdirSync(outDir, { recursive: true, mode: 0o700 });
+        const n = writeAgentArchive(model, outDir);
+        log(bold('\nAgent-readable archive') + green(`  ${n} conversation(s)`) + ` -> ${outDir}`);
+        log(dim('  Point any AI agent at that folder, or open README.md / conversations.jsonl.'));
+      }
+    }
+
+    if (f.to.includes('claude')) await restoreToClaude(model.conversations, f);
+    if (f.to.includes('codex')) await restoreToCodex(model.conversations, f);
+
+    if (f.to.length === 0 && !f.dryRun) {
+      log(dim('\nTip: add --to claude or --to codex to also restore these into a desktop app.'));
+    }
+  } finally {
+    if (tempDir) { try { fs.rmSync(tempDir, { recursive: true, force: true }); } catch { /* ignore */ } _tempPaths.delete(tempDir); }
+  }
+}
+
+function printImportHelp() {
+  log(`${bold('agent-history-rescue import')} - recover conversations from an exported data archive
+
+  agent-history-rescue import <export.zip|folder> [options]
+
+  Turns an official Claude data export (the zip from Settings > Privacy > Export data,
+  useful after a ban / lockout) into a readable archive, and optionally restores the
+  conversations into Claude Code and/or Codex. Everything is local; nothing is uploaded.
+
+  --to claude|codex|all   Also restore into that desktop app (default: archive only)
+  --out <dir>             Where to write the readable archive (default: ~/agent-history-rescue/imported/<ts>)
+  --no-archive            Skip the readable archive (only restore into apps)
+  -n, --dry-run           Show what would happen, write nothing
+  -y, --yes               Skip confirmation
+      --codex-provider <id>  Provider to tag restored Codex threads with (default: openai)
+      --force             Skip the running-app safety check (advanced)
+
+  The readable archive (always on by default) is the safe, universal output: a folder of
+  Markdown plus conversations.jsonl that any AI agent or human can read. Restoring into an
+  app quits-app-first, backs up first, only adds new entries, and never deletes anything.`);
+}
+
+// ===========================================================================
 // Detection, dispatch, help
 // ===========================================================================
 function detectClaude() {
@@ -461,7 +832,16 @@ ${bold('Usage')}
   agent-history-rescue                 Detect Claude Code & Codex and show status
   agent-history-rescue claude [opts]   Recover Claude Code desktop history
   agent-history-rescue codex  [opts]   Diagnose / repair Codex desktop history
+  agent-history-rescue import <zip>    Recover from an exported data archive (e.g. after a ban)
   agent-history-rescue --help          This help
+
+${bold('Import options')} (agent-history-rescue import <export.zip|folder> ...)
+  --to claude|codex|all       Also restore the conversations into that desktop app
+  --out <dir>                 Where to write the readable archive
+  --no-archive                Only restore into apps, skip the readable archive
+  -n, --dry-run               Show what would happen, write nothing
+      --codex-provider <id>   Provider to tag restored Codex threads with (default: openai)
+      --force                 Skip the running-app safety check (advanced)
 
 ${bold('Claude options')} (agent-history-rescue claude ...)
   -l, --list                  List workspaces and conversations (read-only)
@@ -529,6 +909,7 @@ async function main() {
   }
   if (first === 'claude') { await runClaude(argv.slice(1)); return; }
   if (first === 'codex') { await runCodex(argv.slice(1)); return; }
+  if (first === 'import') { await runImport(argv.slice(1)); return; }
   if (!first || first === '--list' || first === '-l' || first === 'status') { printStatus(); return; }
   fail(`Unknown command: ${first}\nRun "agent-history-rescue --help", or pick a backend: "claude" or "codex".`);
 }
