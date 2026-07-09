@@ -234,3 +234,7 @@ export. Shared so you don't have to figure it out the hard way.
 [MIT](LICENSE)，随便用、随便改、随便分享。Copyright © 2026 HeiGeAi (Blake Xu).
 
 > 它在每次改动前都会备份、且从不删除你的对话内容，但毕竟会碰桌面端自己的文件。**确认历史回来之前，先留着备份。**
+
+## 更多开源工具
+
+本项目属于黑哥 AI 的开源武器库。全部开源项目的清单、用途和协议,见 [heigeai.com/opensource](https://www.heigeai.com/opensource/)。
