@@ -6,7 +6,8 @@
     "agent-history-rescue": "bin/agent-history-rescue.js"
   },
   "scripts": {
-    "start": "node bin/agent-history-rescue.js"
+    "start": "node bin/agent-history-rescue.js",
+    "test": "python3 -m unittest discover -s tests -v"
   },
   "keywords": [
     "claude",

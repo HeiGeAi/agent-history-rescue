@@ -10,6 +10,7 @@ What it does (apply mode), after backing everything up first:
     the current one, so they pass the sidebar filter;
   - rewrite the same provider tag inside rollout JSONL session_meta payloads, so
     Codex does not re-index the old value and undo the DB edit;
+  - keep session_index.jsonl provider/archive metadata in sync with the DB;
   - optionally add provider aliases to config.toml (Python 3.11+ only);
   - optionally unarchive threads so archived history returns to the sidebar.
 
@@ -252,11 +253,13 @@ def jsonl_provider_counts(files: list, providers: set) -> dict:
 # --------------------------------------------------------------------------
 # Backup + write helpers.
 # --------------------------------------------------------------------------
-def make_backup(db_path: Path, config_path: Path, codex_home: Path) -> Path:
+def make_backup(db_path: Path, config_path: Path, codex_home: Path, session_index_path: Path) -> Path:
     backup_dir = codex_home / "backups" / f"thread-history-repair-{now_stamp()}"
     backup_dir.mkdir(parents=True, exist_ok=False)
     if config_path.exists():
         shutil.copy2(config_path, backup_dir / "config.toml")
+    if session_index_path.exists():
+        shutil.copy2(session_index_path, backup_dir / "session_index.jsonl")
     with sqlite3.connect(db_path) as src, sqlite3.connect(backup_dir / db_path.name) as dst:
         src.backup(dst)
     return backup_dir
@@ -335,6 +338,53 @@ def patch_jsonl(files, sources, target, codex_home, backup_dir) -> int:
     return changed_files
 
 
+def patch_session_index(index_path: Path, sources: set, target: str, unarchive: bool) -> int:
+    """Keep the desktop index aligned with repaired SQLite and rollout metadata.
+
+    Invalid or unknown JSONL rows are preserved byte-for-byte. Valid rows only
+    change when their provider is being migrated or they are explicitly
+    unarchived.
+    """
+    if not index_path.exists():
+        return 0
+    try:
+        original = index_path.read_text(encoding="utf-8").splitlines(keepends=True)
+    except OSError:
+        return 0
+
+    output: list = []
+    changed_rows = 0
+    for line in original:
+        newline = "\n" if line.endswith("\n") else ""
+        try:
+            item = json.loads(line)
+        except json.JSONDecodeError:
+            output.append(line)
+            continue
+        if not isinstance(item, dict):
+            output.append(line)
+            continue
+
+        changed = False
+        if item.get("model_provider") in sources:
+            item["model_provider"] = target
+            changed = True
+        if unarchive and item.get("archived"):
+            item["archived"] = False
+            if "archived_at" in item:
+                item["archived_at"] = None
+            changed = True
+        if changed:
+            output.append(json.dumps(item, ensure_ascii=False, separators=(",", ":")) + newline)
+            changed_rows += 1
+        else:
+            output.append(line)
+
+    if changed_rows:
+        index_path.write_text("".join(output), encoding="utf-8")
+    return changed_rows
+
+
 def patch_sqlite(db_path, sources, target, unarchive, has_archived) -> None:
     with sqlite3.connect(db_path) as conn:
         conn.execute("begin immediate")
@@ -386,6 +436,7 @@ def main() -> int:
 
     codex_home = codex_home_from_args(args.codex_home)
     config_path = codex_home / "config.toml"
+    session_index_path = codex_home / "session_index.jsonl"
     db_path = find_state_db(codex_home, args.state_db)
     config, config_text, toml_accurate = read_config(config_path)
 
@@ -413,7 +464,7 @@ def main() -> int:
         print("\nDry run only. Re-run with --apply (and --unarchive if you want archived history back).")
         return 0
 
-    backup_dir = make_backup(db_path, config_path, codex_home)
+    backup_dir = make_backup(db_path, config_path, codex_home, session_index_path)
     print(f"\nBackup: {backup_dir}")
 
     if toml_accurate:
@@ -425,6 +476,9 @@ def main() -> int:
             print("      The SQLite + JSONL rewrite below is the core fix and is normally sufficient.")
 
     changed_jsonl = patch_jsonl(rollout_files, set(sources), target, codex_home, backup_dir)
+    changed_index_rows = patch_session_index(
+        session_index_path, set(sources), target, args.unarchive
+    )
     patch_sqlite(db_path, sources, target, args.unarchive, before["has_archived"])
 
     after = summarize_threads(db_path)
@@ -432,6 +486,7 @@ def main() -> int:
 
     print(f"\nConfig aliases added: {'yes' if config_changed else 'no'}")
     print(f"JSONL files patched: {changed_jsonl}")
+    print(f"Session index rows patched: {changed_index_rows}")
     print_summary("After", after)
     if after_counts:
         print("\nSession metadata provider counts after:")
