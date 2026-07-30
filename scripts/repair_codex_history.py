@@ -10,6 +10,7 @@ What it does (apply mode), after backing everything up first:
     the current one, so they pass the sidebar filter;
   - rewrite the same provider tag inside rollout JSONL session_meta payloads, so
     Codex does not re-index the old value and undo the DB edit;
+  - keep session_index.jsonl provider/archive metadata in sync with the DB;
   - optionally add provider aliases to config.toml (Python 3.11+ only);
   - optionally unarchive threads so archived history returns to the sidebar.
 
@@ -27,6 +28,7 @@ import os
 import shutil
 import sqlite3
 import sys
+import uuid
 from pathlib import Path
 
 try:
@@ -252,11 +254,69 @@ def jsonl_provider_counts(files: list, providers: set) -> dict:
 # --------------------------------------------------------------------------
 # Backup + write helpers.
 # --------------------------------------------------------------------------
-def make_backup(db_path: Path, config_path: Path, codex_home: Path) -> Path:
+def snapshot_sqlite_bytes(db_path: Path, backup_dir: Path) -> Path:
+    """Keep exact SQLite files for compensating a failed multi-store apply."""
+    snapshot_dir = backup_dir / "original-sqlite-bytes"
+    snapshot_dir.mkdir()
+    for suffix in ("", "-wal", "-shm"):
+        source = Path(str(db_path) + suffix)
+        if source.exists():
+            shutil.copy2(source, snapshot_dir / source.name)
+    return snapshot_dir
+
+
+def restore_file_bytes(backup_path: Path, destination: Path) -> None:
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = destination.with_name(f".{destination.name}.tmp-{uuid.uuid4().hex}")
+    try:
+        shutil.copy2(backup_path, temp_path)
+        os.replace(temp_path, destination)
+    finally:
+        try:
+            temp_path.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def restore_optional_file(destination: Path, backup_path: Path) -> None:
+    if backup_path.exists():
+        restore_file_bytes(backup_path, destination)
+    else:
+        try:
+            destination.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def restore_sqlite_bytes(db_path: Path, snapshot_dir: Path) -> None:
+    for suffix in ("-wal", "-shm"):
+        try:
+            Path(str(db_path) + suffix).unlink()
+        except FileNotFoundError:
+            pass
+    restore_file_bytes(snapshot_dir / db_path.name, db_path)
+    for suffix in ("-wal", "-shm"):
+        backup_path = snapshot_dir / f"{db_path.name}{suffix}"
+        if backup_path.exists():
+            restore_file_bytes(backup_path, Path(str(db_path) + suffix))
+
+
+def restore_rollout_backups(codex_home: Path, backup_dir: Path) -> None:
+    backup_root = backup_dir / "rollout-jsonl"
+    if not backup_root.exists():
+        return
+    for backup_path in backup_root.rglob("*.jsonl"):
+        restore_file_bytes(backup_path, codex_home / backup_path.relative_to(backup_root))
+
+
+def make_backup(db_path: Path, config_path: Path, codex_home: Path, session_index_path: Path) -> Path:
     backup_dir = codex_home / "backups" / f"thread-history-repair-{now_stamp()}"
     backup_dir.mkdir(parents=True, exist_ok=False)
     if config_path.exists():
         shutil.copy2(config_path, backup_dir / "config.toml")
+    if session_index_path.exists():
+        shutil.copy2(session_index_path, backup_dir / "session_index.jsonl")
+    snapshot_sqlite_bytes(db_path, backup_dir)
     with sqlite3.connect(db_path) as src, sqlite3.connect(backup_dir / db_path.name) as dst:
         src.backup(dst)
     return backup_dir
@@ -335,6 +395,53 @@ def patch_jsonl(files, sources, target, codex_home, backup_dir) -> int:
     return changed_files
 
 
+def patch_session_index(index_path: Path, sources: set, target: str, unarchive: bool) -> int:
+    """Keep the desktop index aligned with repaired SQLite and rollout metadata.
+
+    Invalid or unknown JSONL rows are preserved byte-for-byte. Valid rows only
+    change when their provider is being migrated or they are explicitly
+    unarchived.
+    """
+    if not index_path.exists():
+        return 0
+    try:
+        original = index_path.read_text(encoding="utf-8").splitlines(keepends=True)
+    except OSError:
+        return 0
+
+    output: list = []
+    changed_rows = 0
+    for line in original:
+        newline = "\n" if line.endswith("\n") else ""
+        try:
+            item = json.loads(line)
+        except json.JSONDecodeError:
+            output.append(line)
+            continue
+        if not isinstance(item, dict):
+            output.append(line)
+            continue
+
+        changed = False
+        if item.get("model_provider") in sources:
+            item["model_provider"] = target
+            changed = True
+        if unarchive and item.get("archived"):
+            item["archived"] = False
+            if "archived_at" in item:
+                item["archived_at"] = None
+            changed = True
+        if changed:
+            output.append(json.dumps(item, ensure_ascii=False, separators=(",", ":")) + newline)
+            changed_rows += 1
+        else:
+            output.append(line)
+
+    if changed_rows:
+        index_path.write_text("".join(output), encoding="utf-8")
+    return changed_rows
+
+
 def patch_sqlite(db_path, sources, target, unarchive, has_archived) -> None:
     with sqlite3.connect(db_path) as conn:
         conn.execute("begin immediate")
@@ -386,6 +493,7 @@ def main() -> int:
 
     codex_home = codex_home_from_args(args.codex_home)
     config_path = codex_home / "config.toml"
+    session_index_path = codex_home / "session_index.jsonl"
     db_path = find_state_db(codex_home, args.state_db)
     config, config_text, toml_accurate = read_config(config_path)
 
@@ -413,25 +521,73 @@ def main() -> int:
         print("\nDry run only. Re-run with --apply (and --unarchive if you want archived history back).")
         return 0
 
-    backup_dir = make_backup(db_path, config_path, codex_home)
+    backup_dir = make_backup(db_path, config_path, codex_home, session_index_path)
     print(f"\nBackup: {backup_dir}")
+    try:
+        if toml_accurate:
+            config_changed = ensure_config_aliases(
+                config_path, config, config_text, target, sources
+            )
+        else:
+            config_changed = False
+            if sources:
+                print(
+                    "Note: skipping config provider-alias step "
+                    "(needs Python 3.11+ for safe TOML parsing)."
+                )
+                print(
+                    "      The SQLite + JSONL rewrite below is the core fix "
+                    "and is normally sufficient."
+                )
 
-    if toml_accurate:
-        config_changed = ensure_config_aliases(config_path, config, config_text, target, sources)
-    else:
-        config_changed = False
-        if sources:
-            print("Note: skipping config provider-alias step (needs Python 3.11+ for safe TOML parsing).")
-            print("      The SQLite + JSONL rewrite below is the core fix and is normally sufficient.")
+        changed_jsonl = patch_jsonl(
+            rollout_files, set(sources), target, codex_home, backup_dir
+        )
+        changed_index_rows = patch_session_index(
+            session_index_path, set(sources), target, args.unarchive
+        )
+        patch_sqlite(db_path, sources, target, args.unarchive, before["has_archived"])
 
-    changed_jsonl = patch_jsonl(rollout_files, set(sources), target, codex_home, backup_dir)
-    patch_sqlite(db_path, sources, target, args.unarchive, before["has_archived"])
-
-    after = summarize_threads(db_path)
-    after_counts = jsonl_provider_counts(rollout_files, set(sources + [target]))
+        after = summarize_threads(db_path)
+        after_counts = jsonl_provider_counts(rollout_files, set(sources + [target]))
+    except BaseException as apply_error:
+        rollback_errors = []
+        for label, action in (
+            (
+                str(config_path),
+                lambda: restore_optional_file(config_path, backup_dir / "config.toml"),
+            ),
+            (
+                str(session_index_path),
+                lambda: restore_optional_file(
+                    session_index_path, backup_dir / "session_index.jsonl"
+                ),
+            ),
+            (
+                "rollout JSONL files",
+                lambda: restore_rollout_backups(codex_home, backup_dir),
+            ),
+            (
+                str(db_path),
+                lambda: restore_sqlite_bytes(
+                    db_path, backup_dir / "original-sqlite-bytes"
+                ),
+            ),
+        ):
+            try:
+                action()
+            except OSError as error:
+                rollback_errors.append(f"restore {label}: {error}")
+        if rollback_errors:
+            raise RuntimeError(
+                "Repair failed and compensation was incomplete: "
+                + "; ".join(rollback_errors)
+            ) from apply_error
+        raise
 
     print(f"\nConfig aliases added: {'yes' if config_changed else 'no'}")
     print(f"JSONL files patched: {changed_jsonl}")
+    print(f"Session index rows patched: {changed_index_rows}")
     print_summary("After", after)
     if after_counts:
         print("\nSession metadata provider counts after:")

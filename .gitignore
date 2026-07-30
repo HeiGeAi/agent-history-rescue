@@ -1,5 +1,7 @@
 # dependencies (this project has none, but just in case)
 node_modules/
+__pycache__/
+*.py[cod]
 package-lock.json
 
 # OS noise

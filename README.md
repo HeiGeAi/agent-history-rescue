@@ -2,7 +2,7 @@
 
 <div align="center">
 
-![version](https://img.shields.io/badge/version-3.0.0-blue.svg)
+![version](https://img.shields.io/badge/version-3.0.1-blue.svg)
 ![node](https://img.shields.io/badge/node-%3E%3D16-brightgreen.svg)
 ![supports](https://img.shields.io/badge/supports-Claude%20Code%20%7C%20Codex-7c3aed.svg)
 ![license](https://img.shields.io/badge/license-MIT-green.svg)
@@ -54,9 +54,9 @@ Your conversations are not gone. This tool brings them back, even from just an e
 
 | | **Claude Code** | **Codex** |
 |---|---|---|
-| 对话存哪 | 对话本身在 `~/.claude/projects/*.jsonl`；桌面端那份列表是 `claude-code-sessions/<workspace>/` 里的小指针文件 | 会话在 `~/.codex` 的 `state*.sqlite` + `sessions/*.jsonl` 里 |
+| 对话存哪 | 对话本身在 `~/.claude/projects/*.jsonl`；桌面端那份列表是 `claude-code-sessions/<workspace>/` 里的小指针文件 | 会话在 `~/.codex` 的 `state*.sqlite` + `sessions/*.jsonl` 里，侧栏还会使用 `session_index.jsonl` |
 | 为什么消失 | 桌面端 workspace **按账号分开存**，换账号后开了个空 workspace，旧指针进不来 | 侧栏**只显示当前 `model_provider` 的会话**，换 provider 后旧会话被挡掉；归档的也不显示 |
-| 怎么修 | 把旧指针**复制**进当前账号的 workspace | 把 threads 表 + JSONL 里的旧 provider **改成**当前 provider，需要的话取消归档 |
+| 怎么修 | 把旧指针**复制**进当前账号的 workspace | 把 threads 表、rollout JSONL 和 `session_index.jsonl` 里的旧 provider **改成**当前 provider，需要的话取消归档 |
 
 ---
 

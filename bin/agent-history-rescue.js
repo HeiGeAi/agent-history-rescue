@@ -17,7 +17,7 @@
  *             account / API provider / custom provider name. The threads still
  *             exist in ~/.codex but the sidebar filters by the current
  *             model_provider and hides archived rows. Fix: rewrite the provider
- *             tag in the SQLite threads table + rollout JSONL, add provider
+ *             tag in the SQLite threads table + rollout/session-index JSONL, add provider
  *             aliases, optionally unarchive. Implemented in the bundled Python
  *             script (stdlib sqlite3 + json), invoked as a subprocess.
  *
