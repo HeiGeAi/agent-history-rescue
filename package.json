@@ -1,6 +1,6 @@
 {
   "name": "agent-history-rescue",
-  "version": "3.0.0",
+  "version": "3.0.1",
   "description": "Recover coding-agent conversations that vanished after switching accounts, providers, reinstalling, or upgrading, or rebuild them from an exported data archive (e.g. after a ban). Supports Claude Code and Codex. Backup-first, never deletes, one-command rollback.",
   "bin": {
     "agent-history-rescue": "bin/agent-history-rescue.js"
