@@ -28,6 +28,7 @@ import os
 import shutil
 import sqlite3
 import sys
+import uuid
 from pathlib import Path
 
 try:
@@ -253,6 +254,61 @@ def jsonl_provider_counts(files: list, providers: set) -> dict:
 # --------------------------------------------------------------------------
 # Backup + write helpers.
 # --------------------------------------------------------------------------
+def snapshot_sqlite_bytes(db_path: Path, backup_dir: Path) -> Path:
+    """Keep exact SQLite files for compensating a failed multi-store apply."""
+    snapshot_dir = backup_dir / "original-sqlite-bytes"
+    snapshot_dir.mkdir()
+    for suffix in ("", "-wal", "-shm"):
+        source = Path(str(db_path) + suffix)
+        if source.exists():
+            shutil.copy2(source, snapshot_dir / source.name)
+    return snapshot_dir
+
+
+def restore_file_bytes(backup_path: Path, destination: Path) -> None:
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = destination.with_name(f".{destination.name}.tmp-{uuid.uuid4().hex}")
+    try:
+        shutil.copy2(backup_path, temp_path)
+        os.replace(temp_path, destination)
+    finally:
+        try:
+            temp_path.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def restore_optional_file(destination: Path, backup_path: Path) -> None:
+    if backup_path.exists():
+        restore_file_bytes(backup_path, destination)
+    else:
+        try:
+            destination.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def restore_sqlite_bytes(db_path: Path, snapshot_dir: Path) -> None:
+    for suffix in ("-wal", "-shm"):
+        try:
+            Path(str(db_path) + suffix).unlink()
+        except FileNotFoundError:
+            pass
+    restore_file_bytes(snapshot_dir / db_path.name, db_path)
+    for suffix in ("-wal", "-shm"):
+        backup_path = snapshot_dir / f"{db_path.name}{suffix}"
+        if backup_path.exists():
+            restore_file_bytes(backup_path, Path(str(db_path) + suffix))
+
+
+def restore_rollout_backups(codex_home: Path, backup_dir: Path) -> None:
+    backup_root = backup_dir / "rollout-jsonl"
+    if not backup_root.exists():
+        return
+    for backup_path in backup_root.rglob("*.jsonl"):
+        restore_file_bytes(backup_path, codex_home / backup_path.relative_to(backup_root))
+
+
 def make_backup(db_path: Path, config_path: Path, codex_home: Path, session_index_path: Path) -> Path:
     backup_dir = codex_home / "backups" / f"thread-history-repair-{now_stamp()}"
     backup_dir.mkdir(parents=True, exist_ok=False)
@@ -260,6 +316,7 @@ def make_backup(db_path: Path, config_path: Path, codex_home: Path, session_inde
         shutil.copy2(config_path, backup_dir / "config.toml")
     if session_index_path.exists():
         shutil.copy2(session_index_path, backup_dir / "session_index.jsonl")
+    snapshot_sqlite_bytes(db_path, backup_dir)
     with sqlite3.connect(db_path) as src, sqlite3.connect(backup_dir / db_path.name) as dst:
         src.backup(dst)
     return backup_dir
@@ -466,23 +523,67 @@ def main() -> int:
 
     backup_dir = make_backup(db_path, config_path, codex_home, session_index_path)
     print(f"\nBackup: {backup_dir}")
+    try:
+        if toml_accurate:
+            config_changed = ensure_config_aliases(
+                config_path, config, config_text, target, sources
+            )
+        else:
+            config_changed = False
+            if sources:
+                print(
+                    "Note: skipping config provider-alias step "
+                    "(needs Python 3.11+ for safe TOML parsing)."
+                )
+                print(
+                    "      The SQLite + JSONL rewrite below is the core fix "
+                    "and is normally sufficient."
+                )
 
-    if toml_accurate:
-        config_changed = ensure_config_aliases(config_path, config, config_text, target, sources)
-    else:
-        config_changed = False
-        if sources:
-            print("Note: skipping config provider-alias step (needs Python 3.11+ for safe TOML parsing).")
-            print("      The SQLite + JSONL rewrite below is the core fix and is normally sufficient.")
+        changed_jsonl = patch_jsonl(
+            rollout_files, set(sources), target, codex_home, backup_dir
+        )
+        changed_index_rows = patch_session_index(
+            session_index_path, set(sources), target, args.unarchive
+        )
+        patch_sqlite(db_path, sources, target, args.unarchive, before["has_archived"])
 
-    changed_jsonl = patch_jsonl(rollout_files, set(sources), target, codex_home, backup_dir)
-    changed_index_rows = patch_session_index(
-        session_index_path, set(sources), target, args.unarchive
-    )
-    patch_sqlite(db_path, sources, target, args.unarchive, before["has_archived"])
-
-    after = summarize_threads(db_path)
-    after_counts = jsonl_provider_counts(rollout_files, set(sources + [target]))
+        after = summarize_threads(db_path)
+        after_counts = jsonl_provider_counts(rollout_files, set(sources + [target]))
+    except BaseException as apply_error:
+        rollback_errors = []
+        for label, action in (
+            (
+                str(config_path),
+                lambda: restore_optional_file(config_path, backup_dir / "config.toml"),
+            ),
+            (
+                str(session_index_path),
+                lambda: restore_optional_file(
+                    session_index_path, backup_dir / "session_index.jsonl"
+                ),
+            ),
+            (
+                "rollout JSONL files",
+                lambda: restore_rollout_backups(codex_home, backup_dir),
+            ),
+            (
+                str(db_path),
+                lambda: restore_sqlite_bytes(
+                    db_path, backup_dir / "original-sqlite-bytes"
+                ),
+            ),
+        ):
+            try:
+                action()
+            except OSError as error:
+                rollback_errors.append(f"restore {label}: {error}")
+        if rollback_errors:
+            raise RuntimeError(
+                "Repair failed and compensation was incomplete: "
+                + "; ".join(rollback_errors)
+            ) from apply_error
+        raise
 
     print(f"\nConfig aliases added: {'yes' if config_changed else 'no'}")
     print(f"JSONL files patched: {changed_jsonl}")

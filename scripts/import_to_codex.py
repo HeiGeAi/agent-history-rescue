@@ -125,9 +125,21 @@ def write_rollout(home: Path, conv, provider, cwd, sid):
             "type": "response_item",
             "payload": {"type": "message", "role": role, "content": [{"type": ctype, "text": m.get("text", "")}]},
         })
-    with (home / rel_path).open("w", encoding="utf-8") as fh:
-        for ln in lines:
-            fh.write(json.dumps(ln, ensure_ascii=False) + "\n")
+    content = "".join(json.dumps(line, ensure_ascii=False) + "\n" for line in lines)
+    rollout_path = home / rel_path
+    created_file = False
+    try:
+        # Exclusive creation preserves a pre-existing orphan instead of replacing it.
+        with rollout_path.open("x", encoding="utf-8") as fh:
+            created_file = True
+            fh.write(content)
+    except BaseException:
+        if created_file:
+            try:
+                rollout_path.unlink()
+            except FileNotFoundError:
+                pass
+        raise
     return rel_path, created
 
 
@@ -193,10 +205,63 @@ def append_session_index(index_path: Path, rows) -> int:
     content += "\n".join(additions) + "\n"
     index_path.parent.mkdir(parents=True, exist_ok=True)
     temp_path = index_path.with_name(f".{index_path.name}.tmp-{uuid.uuid4().hex}")
-    temp_path.write_text(content, encoding="utf-8")
-    temp_path.chmod(file_mode)
-    os.replace(temp_path, index_path)
+    try:
+        temp_path.write_text(content, encoding="utf-8")
+        temp_path.chmod(file_mode)
+        os.replace(temp_path, index_path)
+    finally:
+        try:
+            temp_path.unlink()
+        except FileNotFoundError:
+            pass
     return len(additions)
+
+
+def snapshot_sqlite_bytes(db_path: Path, backup_dir: Path) -> Path:
+    """Keep the exact SQLite files so a failed multi-store apply can compensate."""
+    snapshot_dir = backup_dir / "original-sqlite-bytes"
+    snapshot_dir.mkdir()
+    for suffix in ("", "-wal", "-shm"):
+        source = Path(str(db_path) + suffix)
+        if source.exists():
+            shutil.copy2(source, snapshot_dir / source.name)
+    return snapshot_dir
+
+
+def restore_file_bytes(backup_path: Path, destination: Path) -> None:
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = destination.with_name(f".{destination.name}.tmp-{uuid.uuid4().hex}")
+    try:
+        shutil.copy2(backup_path, temp_path)
+        os.replace(temp_path, destination)
+    finally:
+        try:
+            temp_path.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def restore_optional_file(destination: Path, backup_path: Path) -> None:
+    if backup_path.exists():
+        restore_file_bytes(backup_path, destination)
+    else:
+        try:
+            destination.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def restore_sqlite_bytes(db_path: Path, snapshot_dir: Path) -> None:
+    for suffix in ("-wal", "-shm"):
+        try:
+            Path(str(db_path) + suffix).unlink()
+        except FileNotFoundError:
+            pass
+    restore_file_bytes(snapshot_dir / db_path.name, db_path)
+    for suffix in ("-wal", "-shm"):
+        backup_path = snapshot_dir / f"{db_path.name}{suffix}"
+        if backup_path.exists():
+            restore_file_bytes(backup_path, Path(str(db_path) + suffix))
 
 
 def main() -> int:
@@ -228,6 +293,7 @@ def main() -> int:
 
     backup_dir = home / "backups" / f"import-{now_stamp()}-{uuid.uuid4().hex[:6]}"
     backup_dir.mkdir(parents=True, exist_ok=True)
+    sqlite_snapshot_dir = snapshot_sqlite_bytes(db_path, backup_dir)
     with sqlite3.connect(db_path) as src, sqlite3.connect(backup_dir / db_path.name) as dst:
         src.backup(dst)
     session_index_path = home / "session_index.jsonl"
@@ -238,56 +304,95 @@ def main() -> int:
     written_files = []
     index_rows = []
     written = skipped = failed = 0
-    with sqlite3.connect(str(db_path)) as conn:
-        conn.execute("begin immediate")
-        for conv in convs:
-            sid = safe_id(conv)
-            existing_columns = ["rollout_path", "model_provider"]
-            if "archived" in cols:
-                existing_columns.append("archived")
-            existing = conn.execute(
-                f"select {','.join(existing_columns)} from threads where id=?",
-                (sid,),
-            ).fetchone()
-            if existing:
-                skipped += 1
-                index_rows.append(
-                    session_index_entry(
-                        conv,
-                        sid,
-                        existing[0],
-                        existing[1] or provider,
-                        cwd,
-                        existing[2] if len(existing) > 2 else False,
+    listing = backup_dir / "imported-rollouts.txt"
+    try:
+        with sqlite3.connect(str(db_path)) as conn:
+            conn.execute("begin immediate")
+            for conv in convs:
+                sid = safe_id(conv)
+                existing_columns = ["rollout_path", "model_provider"]
+                if "archived" in cols:
+                    existing_columns.append("archived")
+                existing = conn.execute(
+                    f"select {','.join(existing_columns)} from threads where id=?",
+                    (sid,),
+                ).fetchone()
+                if existing:
+                    skipped += 1
+                    index_rows.append(
+                        session_index_entry(
+                            conv,
+                            sid,
+                            existing[0],
+                            existing[1] or provider,
+                            cwd,
+                            existing[2] if len(existing) > 2 else False,
+                        )
                     )
-                )
-                continue
-            rel_path = None
+                    continue
+                rel_path = None
+                try:
+                    rel_path, created = write_rollout(home, conv, provider, cwd, sid)
+                    abs_rollout_path = home / rel_path
+                    insert_thread(
+                        conn, cols, conv, sid, str(abs_rollout_path), provider, cwd, created
+                    )
+                    written_files.append(abs_rollout_path)
+                    index_rows.append(
+                        session_index_entry(conv, sid, abs_rollout_path, provider, cwd)
+                    )
+                    written += 1
+                except Exception as e:  # noqa: BLE001
+                    failed += 1
+                    # Remove the orphan rollout whose DB row failed, so disk and DB agree.
+                    if rel_path is not None:
+                        try:
+                            (home / rel_path).unlink()
+                        except OSError:
+                            pass
+                    print(f"  ! skipped one conversation: {e}")
+            conn.commit()
             try:
-                rel_path, created = write_rollout(home, conv, provider, cwd, sid)
-                abs_rollout_path = home / rel_path
-                insert_thread(conn, cols, conv, sid, str(abs_rollout_path), provider, cwd, created)
-                written_files.append(abs_rollout_path)
-                index_rows.append(
-                    session_index_entry(conv, sid, abs_rollout_path, provider, cwd)
-                )
-                written += 1
-            except Exception as e:  # noqa: BLE001
-                failed += 1
-                # Remove the orphan rollout whose DB row failed, so disk and DB agree.
-                if rel_path is not None:
-                    try:
-                        (home / rel_path).unlink()
-                    except OSError:
-                        pass
-                print(f"  ! skipped one conversation: {e}")
-        conn.commit()
-        try:
-            conn.execute("pragma wal_checkpoint(full)")
-        except sqlite3.Error:
-            pass
+                conn.execute("pragma wal_checkpoint(full)")
+            except sqlite3.Error:
+                pass
 
-    indexed = append_session_index(session_index_path, index_rows)
+        indexed = append_session_index(session_index_path, index_rows)
+        if written_files:
+            listing.write_text(
+                "\n".join(str(path) for path in written_files) + "\n", encoding="utf-8"
+            )
+    except BaseException as apply_error:
+        rollback_errors = []
+        for path in written_files:
+            try:
+                path.unlink()
+            except FileNotFoundError:
+                pass
+            except OSError as error:
+                rollback_errors.append(f"delete {path}: {error}")
+        try:
+            listing.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError as error:
+            rollback_errors.append(f"delete {listing}: {error}")
+        try:
+            restore_optional_file(
+                session_index_path, backup_dir / "session_index.jsonl"
+            )
+        except OSError as error:
+            rollback_errors.append(f"restore {session_index_path}: {error}")
+        try:
+            restore_sqlite_bytes(db_path, sqlite_snapshot_dir)
+        except OSError as error:
+            rollback_errors.append(f"restore {db_path}: {error}")
+        if rollback_errors:
+            raise RuntimeError(
+                "Import failed and compensation was incomplete: "
+                + "; ".join(rollback_errors)
+            ) from apply_error
+        raise
 
     extra = []
     if skipped:
@@ -298,8 +403,6 @@ def main() -> int:
     print(f"Session index rows added: {indexed}")
     print("Restart Codex desktop to see them in the sidebar.")
     if written_files:
-        listing = backup_dir / "imported-rollouts.txt"
-        listing.write_text("\n".join(str(p) for p in written_files) + "\n", encoding="utf-8")
         print(
             f"\nTo roll back: restore {db_path.name} and session_index.jsonl "
             f"from {backup_dir}, then delete the rollout files"
