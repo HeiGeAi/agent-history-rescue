@@ -8,6 +8,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import uuid
 from pathlib import Path
 from unittest import mock
 
@@ -25,6 +26,77 @@ def load_script(path: Path, name: str):
 
 
 class CodexRepairTests(unittest.TestCase):
+    def _run_import_with_rollout_failures(self, failures, *, continue_on_error=False):
+        temporary_directory = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary_directory.cleanup)
+        root = Path(temporary_directory.name)
+        home = root / ".codex"
+        home.mkdir()
+        with sqlite3.connect(home / "state_5.sqlite") as conn:
+            conn.execute(
+                "create table threads ("
+                "id text primary key, rollout_path text, model_provider text)"
+            )
+        job = root / "job.json"
+        conversations = [
+            {
+                "id": conversation_id,
+                "title": conversation_id,
+                "createdAt": "2026-07-14T00:00:00Z",
+                "messages": [],
+            }
+            for conversation_id in ("first", "second")
+        ]
+        job.write_text(
+            json.dumps(
+                {
+                    "codexHome": str(home),
+                    "defaultProvider": "openai",
+                    "conversations": conversations,
+                }
+            ),
+            encoding="utf-8",
+        )
+        module = load_script(IMPORT_SCRIPT, f"import_failure_{uuid.uuid4().hex}")
+        original_write_rollout = module.write_rollout
+
+        def selectively_fail(home_path, conv, provider, cwd, sid):
+            if conv["id"] in failures:
+                raise OSError(f"injected failure for {conv['id']}")
+            return original_write_rollout(home_path, conv, provider, cwd, sid)
+
+        argv = [str(IMPORT_SCRIPT), str(job), "--apply"]
+        if continue_on_error:
+            argv.append("--continue-on-error")
+        output = io.StringIO()
+        with mock.patch.object(
+            module, "write_rollout", side_effect=selectively_fail
+        ), mock.patch.object(sys, "argv", argv), contextlib.redirect_stdout(output):
+            result = module.main()
+        return result, output.getvalue()
+
+    def test_import_returns_nonzero_after_partial_failure(self):
+        result, output = self._run_import_with_rollout_failures({"second"})
+
+        self.assertNotEqual(result, 0)
+        self.assertIn("Imported 1 conversation(s)", output)
+        self.assertIn("1 failed", output)
+
+    def test_import_returns_nonzero_when_every_conversation_fails(self):
+        result, output = self._run_import_with_rollout_failures({"first", "second"})
+
+        self.assertNotEqual(result, 0)
+        self.assertIn("Imported 0 conversation(s)", output)
+        self.assertIn("2 failed", output)
+
+    def test_continue_on_error_explicitly_allows_zero_exit(self):
+        result, output = self._run_import_with_rollout_failures(
+            {"second"}, continue_on_error=True
+        )
+
+        self.assertEqual(result, 0)
+        self.assertIn("1 failed", output)
+
     def test_import_rolls_back_every_store_when_session_index_write_fails(self):
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp) / ".codex"
@@ -140,7 +212,7 @@ class CodexRepairTests(unittest.TestCase):
             ), mock.patch.object(
                 sys, "argv", [str(IMPORT_SCRIPT), str(job), "--apply"]
             ), contextlib.redirect_stdout(io.StringIO()):
-                self.assertEqual(module.main(), 0)
+                self.assertEqual(module.main(), 1)
 
             self.assertEqual(list((home / "sessions").rglob("*.jsonl")), [])
             self.assertEqual(list(home.rglob(".*.tmp-*")), [])

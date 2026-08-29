@@ -268,6 +268,11 @@ def main() -> int:
     ap = argparse.ArgumentParser(description="Import recovered conversations into Codex.")
     ap.add_argument("job", help="Path to the job JSON written by the Node CLI")
     ap.add_argument("--apply", action="store_true", help="Apply. Without it, dry run.")
+    ap.add_argument(
+        "--continue-on-error",
+        action="store_true",
+        help="Return success after partial import failures (default: fail).",
+    )
     args = ap.parse_args()
 
     job = json.loads(Path(args.job).read_text(encoding="utf-8"))
@@ -408,7 +413,7 @@ def main() -> int:
             f"from {backup_dir}, then delete the rollout files"
         )
         print(f"listed in {listing}")
-    return 0
+    return 0 if failed == 0 or args.continue_on_error else 1
 
 
 if __name__ == "__main__":
