@@ -547,6 +547,7 @@ def main() -> int:
     if not sources and not (args.unarchive and before["archived"]):
         print("\nNothing to repair: all threads are already on the target provider"
               + (" and none are archived." if before["has_archived"] else "."))
+        return 0
 
     if not args.apply:
         print("\nDry run only. Re-run with --apply (and --unarchive if you want archived history back).")
