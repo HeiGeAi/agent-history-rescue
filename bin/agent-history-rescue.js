@@ -353,7 +353,15 @@ function restoreCodex(backupDir, home) {
   for (const f of safeReaddir(backupDir)) {
     const src = path.join(backupDir, f);
     if (f === 'rollout-jsonl' || isDir(src)) continue;
-    fs.copyFileSync(src, path.join(home, f)); // config.toml and the state*.sqlite
+    const dest = path.join(home, f);
+    if (f.endsWith('.sqlite')) {
+      // Delete stale WAL/SHM first: a leftover WAL would be replayed onto the
+      // restored database, silently undoing the rollback (or corrupting it).
+      for (const suffix of ['-wal', '-shm']) {
+        try { fs.unlinkSync(dest + suffix); } catch { /* absent is fine */ }
+      }
+    }
+    fs.copyFileSync(src, dest); // config.toml and the state*.sqlite
     restored++;
   }
   const rj = path.join(backupDir, 'rollout-jsonl');
