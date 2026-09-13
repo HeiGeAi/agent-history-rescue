@@ -332,6 +332,9 @@ def backup_jsonl(file_path: Path, codex_home: Path, backup_dir: Path) -> None:
 
 
 _BARE_KEY_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+# Provider names come from the local state DB; only safe tokens may be written
+# into config.toml (aligned with the safe-id guard on the import side).
+_SAFE_PROVIDER_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 
 
 def toml_key(key) -> str:
@@ -368,6 +371,9 @@ def ensure_config_aliases(config_path, config, config_text, target_provider, sou
     target["name"] = None
     additions: list = []
     for source in missing:
+        if not _SAFE_PROVIDER_RE.match(source):
+            print(f"Skipping unsafe provider name in config alias: {source!r}")
+            continue
         additions.append("")
         additions.append(f"[model_providers.{toml_key(source)}]")
         for key, value in target.items():
@@ -376,6 +382,8 @@ def ensure_config_aliases(config_path, config, config_text, target_provider, sou
             if value is None:
                 continue  # TOML has no null
             additions.append(f"{toml_key(key)} = {toml_value(value)}")
+    if not additions:
+        return False
     marker = "\n[mcp_servers]"
     addition_text = "\n".join(additions) + "\n"
     if marker in config_text:
