@@ -463,6 +463,27 @@ function extractZip(zipPath, destDir) {
   return false;
 }
 
+// The export zip may come from an untrusted source. Modern unzip/bsdtar/
+// Expand-Archive already reject `../` and absolute-path entries, but do not
+// rely on that alone: after extraction, verify no entry (e.g. a symlink)
+// resolves outside the temp dir.
+function assertExtractionContained(destDir) {
+  const root = fs.realpathSync(destDir);
+  const stack = [root];
+  while (stack.length) {
+    const dir = stack.pop();
+    for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+      const p = path.join(dir, e.name);
+      let real;
+      try { real = fs.realpathSync(p); } catch { continue; } // dangling symlink: harmless, not followed
+      if (real !== root && !real.startsWith(root + path.sep)) {
+        fail(`Unsafe archive entry escapes the extraction directory: ${p}`);
+      }
+      if (e.isDirectory()) stack.push(p);
+    }
+  }
+}
+
 // Find the directory that actually holds conversations.json (bounded recursive search).
 function findExportRoot(dir, depth = 3) {
   if (fs.existsSync(path.join(dir, 'conversations.json'))) return dir;
@@ -757,6 +778,7 @@ async function runImport(argv) {
     _tempPaths.add(tempDir);
     log(dim('Extracting export archive...'));
     if (!extractZip(f.src, tempDir)) fail('Could not extract the zip. Install `unzip`, or extract it yourself and pass the folder.');
+    assertExtractionContained(tempDir);
     workDir = tempDir;
   }
   try {
