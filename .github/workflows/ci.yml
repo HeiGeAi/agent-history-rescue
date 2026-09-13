@@ -25,5 +25,8 @@ jobs:
           python-version: ${{ matrix.python-version }}
       - name: Check JavaScript entry point
         run: node --check bin/agent-history-rescue.js
+      - name: Install tomli on Python < 3.11
+        if: matrix.python-version == '3.9'
+        run: python -m pip install tomli
       - name: Run isolated repair tests
         run: npm test

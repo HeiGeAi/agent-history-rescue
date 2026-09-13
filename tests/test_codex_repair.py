@@ -11,6 +11,11 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+try:
+    import tomllib  # Python 3.11+
+except ModuleNotFoundError:  # Python 3.9/3.10: tomli installed in CI
+    import tomli as tomllib
+
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "repair_codex_history.py"
@@ -417,7 +422,6 @@ class ConfigAliasTests(unittest.TestCase):
         }
         changed, text = self._write_alias(block, "azure")
         self.assertTrue(changed)
-        import tomllib
         parsed = tomllib.loads(text)["model_providers"]["azure"]
         self.assertEqual(parsed["query_params"], {"api-version": "2024-01"})
         self.assertEqual(parsed["http_headers"], {"X-Custom": "v"})
@@ -437,7 +441,6 @@ class ConfigAliasTests(unittest.TestCase):
         block = {"name": None, "base_url": "https://api.example.com"}
         changed, text = self._write_alias(block, "sub.provider")
         self.assertTrue(changed)
-        import tomllib
         parsed = tomllib.loads(text)["model_providers"]
         self.assertIn("sub.provider", parsed)
         self.assertEqual(parsed["sub.provider"]["name"], "sub.provider")
