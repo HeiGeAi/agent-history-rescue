@@ -25,6 +25,7 @@ import argparse
 import datetime as dt
 import json
 import os
+import re
 import shutil
 import sqlite3
 import sys
@@ -330,6 +331,32 @@ def backup_jsonl(file_path: Path, codex_home: Path, backup_dir: Path) -> None:
         shutil.copy2(file_path, dest)
 
 
+_BARE_KEY_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+
+
+def toml_key(key) -> str:
+    """TOML key: bare when safe, quoted otherwise (dots/quotes stay inside one key)."""
+    key = str(key)
+    return key if _BARE_KEY_RE.match(key) else json.dumps(key, ensure_ascii=False)
+
+
+def toml_value(value) -> str:
+    """Encode a Python value as a TOML literal, including inline tables and arrays.
+    Dicts used to be stringified via str() (a Python repr), which corrupted types."""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (int, float)):
+        return str(value)
+    if isinstance(value, str):
+        return json.dumps(value, ensure_ascii=False)
+    if isinstance(value, dict):
+        items = ", ".join(f"{toml_key(k)} = {toml_value(v)}" for k, v in value.items() if v is not None)
+        return "{ " + items + " }" if items else "{}"
+    if isinstance(value, (list, tuple)):
+        return "[" + ", ".join(toml_value(v) for v in value) + "]"
+    return json.dumps(str(value), ensure_ascii=False)
+
+
 def ensure_config_aliases(config_path, config, config_text, target_provider, sources) -> bool:
     blocks = provider_blocks(config)
     if target_provider not in blocks or not sources:
@@ -342,17 +369,13 @@ def ensure_config_aliases(config_path, config, config_text, target_provider, sou
     additions: list = []
     for source in missing:
         additions.append("")
-        additions.append(f"[model_providers.{source}]")
+        additions.append(f"[model_providers.{toml_key(source)}]")
         for key, value in target.items():
             if key == "name":
                 value = source
-            if isinstance(value, bool):
-                encoded = "true" if value else "false"
-            elif isinstance(value, (int, float)):
-                encoded = str(value)
-            else:
-                encoded = json.dumps(str(value), ensure_ascii=False)
-            additions.append(f"{key} = {encoded}")
+            if value is None:
+                continue  # TOML has no null
+            additions.append(f"{toml_key(key)} = {toml_value(value)}")
     marker = "\n[mcp_servers]"
     addition_text = "\n".join(additions) + "\n"
     if marker in config_text:
