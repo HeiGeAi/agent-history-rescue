@@ -22,6 +22,7 @@ enough. Part of https://github.com/HeiGeAi/agent-history-rescue (MIT).
 from __future__ import annotations
 
 import argparse
+import contextlib
 import datetime as dt
 import json
 import os
@@ -164,7 +165,7 @@ def thread_columns(conn) -> set:
 
 
 def summarize_threads(db_path: Path) -> dict:
-    with connect_read(db_path) as conn:
+    with contextlib.closing(connect_read(db_path)) as conn:
         conn.row_factory = sqlite3.Row
         cols = thread_columns(conn)
         if not cols:
@@ -331,7 +332,8 @@ def make_backup(db_path: Path, config_path: Path, codex_home: Path, session_inde
     if session_index_path.exists():
         shutil.copy2(session_index_path, backup_dir / "session_index.jsonl")
     snapshot_sqlite_bytes(db_path, backup_dir)
-    with sqlite3.connect(db_path) as src, sqlite3.connect(backup_dir / db_path.name) as dst:
+    with contextlib.closing(sqlite3.connect(db_path)) as src, \
+            contextlib.closing(sqlite3.connect(backup_dir / db_path.name)) as dst:
         src.backup(dst)
     return backup_dir
 
@@ -487,7 +489,7 @@ def patch_session_index(index_path: Path, sources: set, target: str, unarchive: 
 
 
 def patch_sqlite(db_path, sources, target, unarchive, has_archived) -> None:
-    with sqlite3.connect(db_path) as conn:
+    with contextlib.closing(sqlite3.connect(db_path)) as conn:
         conn.execute("begin immediate")
         if sources:
             placeholders = ",".join("?" for _ in sources)

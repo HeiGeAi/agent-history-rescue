@@ -24,6 +24,7 @@ Job file shape (JSON):
 from __future__ import annotations
 
 import argparse
+import contextlib
 import datetime as dt
 import hashlib
 import json
@@ -276,7 +277,7 @@ def main() -> int:
     convs = job.get("conversations", [])
     db_path = find_state_db(home)
 
-    with sqlite3.connect(str(db_path)) as conn:
+    with contextlib.closing(sqlite3.connect(str(db_path))) as conn:
         cols = {r[1] for r in conn.execute("pragma table_info(threads)").fetchall()}
         provider = job.get("defaultProvider") or infer_provider(conn)
     if "id" not in cols or "rollout_path" not in cols or "model_provider" not in cols:
@@ -294,7 +295,8 @@ def main() -> int:
     backup_dir = home / "backups" / f"import-{now_stamp()}-{uuid.uuid4().hex[:6]}"
     backup_dir.mkdir(parents=True, exist_ok=True)
     sqlite_snapshot_dir = snapshot_sqlite_bytes(db_path, backup_dir)
-    with sqlite3.connect(db_path) as src, sqlite3.connect(backup_dir / db_path.name) as dst:
+    with contextlib.closing(sqlite3.connect(db_path)) as src, \
+            contextlib.closing(sqlite3.connect(backup_dir / db_path.name)) as dst:
         src.backup(dst)
     session_index_path = home / "session_index.jsonl"
     if session_index_path.exists():
@@ -306,7 +308,7 @@ def main() -> int:
     written = skipped = failed = 0
     listing = backup_dir / "imported-rollouts.txt"
     try:
-        with sqlite3.connect(str(db_path)) as conn:
+        with contextlib.closing(sqlite3.connect(str(db_path))) as conn:
             conn.execute("begin immediate")
             for conv in convs:
                 sid = safe_id(conv)
