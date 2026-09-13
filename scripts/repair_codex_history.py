@@ -85,13 +85,26 @@ def parse_scalar(v: str):
     return v.strip('"').strip("'")
 
 
+def _strip_toml_comment(line: str) -> str:
+    """Strip a # comment only when it sits outside quoted strings."""
+    in_single = in_double = False
+    for i, ch in enumerate(line):
+        if ch == '"' and not in_single:
+            in_double = not in_double
+        elif ch == "'" and not in_double:
+            in_single = not in_single
+        elif ch == "#" and not in_single and not in_double:
+            return line[:i]
+    return line
+
+
 def parse_toml_minimal(text: str) -> dict:
     """Read just enough TOML for our needs: top-level model_provider and the
     [model_providers.NAME] tables. Naive but dependency-free."""
     data: dict = {}
     cur = data
     for raw in text.splitlines():
-        line = raw.split("#", 1)[0].strip()
+        line = _strip_toml_comment(raw).strip()
         if not line:
             continue
         if line.startswith("[") and line.endswith("]"):
