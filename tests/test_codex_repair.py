@@ -386,5 +386,98 @@ class CodexRepairTests(unittest.TestCase):
             )
 
 
+
+
+class ConfigAliasTests(unittest.TestCase):
+    """Regression tests for config.toml alias writing (audit findings B2/S1)."""
+
+    def setUp(self):
+        self.mod = load_script(SCRIPT, "repair_codex_history_alias")
+
+    def _write_alias(self, target_block, source, target="openai"):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        config_path = Path(tmp.name) / "config.toml"
+        config_path.write_text('[model_providers.' + target + ']' + chr(10) + 'name = "' + target + '"' + chr(10), encoding="utf-8")
+        config = {"model_providers": {target: target_block}}
+        changed = self.mod.ensure_config_aliases(
+            config_path, config, config_path.read_text(encoding="utf-8"), target, [source]
+        )
+        return changed, config_path.read_text(encoding="utf-8")
+
+    def test_dict_and_list_fields_stay_toml_typed(self):
+        block = {
+            "name": None,
+            "base_url": "https://api.example.com",
+            "query_params": {"api-version": "2024-01"},
+            "http_headers": {"X-Custom": "v"},
+            "aliases": ["a", "b"],
+            "requires_auth": True,
+            "priority": 3,
+        }
+        changed, text = self._write_alias(block, "azure")
+        self.assertTrue(changed)
+        import tomllib
+        parsed = tomllib.loads(text)["model_providers"]["azure"]
+        self.assertEqual(parsed["query_params"], {"api-version": "2024-01"})
+        self.assertEqual(parsed["http_headers"], {"X-Custom": "v"})
+        self.assertEqual(parsed["aliases"], ["a", "b"])
+        self.assertIs(parsed["requires_auth"], True)
+        self.assertEqual(parsed["priority"], 3)
+        self.assertEqual(parsed["name"], "azure")
+
+    def test_unsafe_provider_name_is_skipped(self):
+        block = {"name": None, "base_url": "https://api.example.com"}
+        evil = 'bad"]\n[evil_section'
+        changed, text = self._write_alias(block, evil)
+        self.assertFalse(changed)
+        self.assertNotIn("evil_section", text)
+
+    def test_dotted_provider_name_written_as_quoted_key(self):
+        block = {"name": None, "base_url": "https://api.example.com"}
+        changed, text = self._write_alias(block, "sub.provider")
+        self.assertTrue(changed)
+        import tomllib
+        parsed = tomllib.loads(text)["model_providers"]
+        self.assertIn("sub.provider", parsed)
+        self.assertEqual(parsed["sub.provider"]["name"], "sub.provider")
+
+    def test_parse_toml_minimal_keeps_hash_inside_quotes(self):
+        text = 'model_provider = "ac#me" # comment' + chr(10) + "[model_providers.ab]" + chr(10) + 'base_url = "http://x/#f"' + chr(10)
+        parsed = self.mod.parse_toml_minimal(text)
+        self.assertEqual(parsed["model_provider"], "ac#me")
+        self.assertEqual(parsed["model_providers"]["ab"]["base_url"], "http://x/#f")
+
+
+class NothingToRepairTests(unittest.TestCase):
+    """Regression test for audit finding B3: no-op apply must exit early."""
+
+    def test_apply_with_nothing_to_repair_creates_no_backup(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / ".codex"
+            home.mkdir()
+            db_path = home / "state_5.sqlite"
+            with contextlib.closing(sqlite3.connect(db_path)) as conn:
+                conn.execute(
+                    "create table threads ("
+                    "id text primary key, rollout_path text, model_provider text, "
+                    "title text, cwd text, created_at integer, "
+                    "updated_at integer, has_user_event integer, preview text)"
+                )
+                conn.execute(
+                    "insert into threads values (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    ("t1", str(home / "sessions/t1.jsonl"), "openai", "T", "/tmp", 1, 1, 1, "T"),
+                )
+                conn.commit()
+            result = subprocess.run(
+                [sys.executable, str(SCRIPT), "--codex-home", str(home), "--apply"],
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("Nothing to repair", result.stdout)
+            self.assertFalse((home / "backups").exists())
+
+
 if __name__ == "__main__":
     unittest.main()
