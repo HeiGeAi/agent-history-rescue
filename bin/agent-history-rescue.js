@@ -722,7 +722,12 @@ async function runImport(argv) {
   const f = { src: null, to: [], out: null, dryRun: false, yes: false, force: false, noArchive: false, codexProvider: null, codexHome: null };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
-    if (a === '--to') { const v = argv[++i]; if (v === 'all') f.to = ['claude', 'codex']; else f.to.push(v); }
+    if (a === '--to') {
+      const v = argv[++i];
+      if (v === 'all') f.to = ['claude', 'codex'];
+      else if (v === 'claude' || v === 'codex') f.to.push(v);
+      else fail(`Unknown --to target: ${v}  (expected: claude, codex, or all)`);
+    }
     else if (a === '--out') f.out = argv[++i];
     else if (a === '--dry-run' || a === '-n') f.dryRun = true;
     else if (a === '--yes' || a === '-y') f.yes = true;
