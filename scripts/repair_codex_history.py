@@ -324,7 +324,7 @@ def restore_rollout_backups(codex_home: Path, backup_dir: Path) -> None:
 
 
 def make_backup(db_path: Path, config_path: Path, codex_home: Path, session_index_path: Path) -> Path:
-    backup_dir = codex_home / "backups" / f"thread-history-repair-{now_stamp()}"
+    backup_dir = codex_home / "backups" / f"thread-history-repair-{now_stamp()}-{uuid.uuid4().hex[:6]}"
     backup_dir.mkdir(parents=True, exist_ok=False)
     if config_path.exists():
         shutil.copy2(config_path, backup_dir / "config.toml")
