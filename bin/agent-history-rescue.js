@@ -667,10 +667,16 @@ async function restoreToClaude(conversations, flags) {
     // Deterministic session id from the export's conversation uuid -> idempotent.
     const sessionId = safeId(conv);
     const transcriptPath = path.join(projectDir, `${sessionId}.jsonl`);
-    const already = fs.existsSync(transcriptPath) || existingCli.has(sessionId);
-    if (already) { skipped++; continue; }
-    fs.writeFileSync(transcriptPath, conversationToClaudeTranscript(conv, sessionId, cwd));
-    if (targetContainer) {
+    // Transcript and Recents pointer are restored independently: if a previous
+    // run wrote the transcript but crashed before the pointer (or the pointer
+    // was deleted), a re-run must still repair the missing piece.
+    const haveTranscript = fs.existsSync(transcriptPath);
+    const havePointer = existingCli.has(sessionId);
+    if (haveTranscript && (havePointer || !targetContainer)) { skipped++; continue; }
+    if (!haveTranscript) {
+      fs.writeFileSync(transcriptPath, conversationToClaudeTranscript(conv, sessionId, cwd));
+    }
+    if (targetContainer && !havePointer) {
       const ms = toMs(conv.updatedAt, Date.now());
       const pointer = {
         sessionId: `local_${crypto.randomUUID()}`, cliSessionId: sessionId, cwd, originCwd: cwd,
@@ -678,6 +684,7 @@ async function restoreToClaude(conversations, flags) {
         model: 'claude-recovered', isArchived: false, title: conv.title, titleSource: 'auto',
       };
       fs.writeFileSync(path.join(targetContainer, `${pointer.sessionId}.json`), JSON.stringify(pointer));
+      existingCli.add(sessionId); // guard against duplicate ids within one export
     }
     n++;
   }
