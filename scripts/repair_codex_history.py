@@ -249,15 +249,14 @@ def jsonl_provider_counts(files: list, providers: set) -> dict:
         try:
             with file_path.open("r", encoding="utf-8") as handle:
                 for line in handle:
-                    if '"type":"session_meta"' not in line and '"type": "session_meta"' not in line:
-                        continue
                     try:
                         item = json.loads(line)
                     except json.JSONDecodeError:
                         continue
                     provider = (
                         item.get("payload", {}).get("model_provider")
-                        if item.get("type") == "session_meta" else None
+                        if isinstance(item, dict) and item.get("type") == "session_meta"
+                        and isinstance(item.get("payload"), dict) else None
                     )
                     if provider in counts:
                         counts[provider] += 1
@@ -420,14 +419,14 @@ def patch_jsonl(files, sources, target, codex_home, backup_dir) -> int:
         output: list = []
         for line in original:
             new_line = line
-            if '"type":"session_meta"' in line or '"type": "session_meta"' in line:
+            if line.strip():
                 try:
                     item = json.loads(line)
                 except json.JSONDecodeError:
                     item = None
-                if item and item.get("type") == "session_meta":
+                if isinstance(item, dict) and item.get("type") == "session_meta":
                     payload = item.get("payload") or {}
-                    if payload.get("model_provider") in sources:
+                    if isinstance(payload, dict) and payload.get("model_provider") in sources:
                         payload["model_provider"] = target
                         item["payload"] = payload
                         newline = "\n" if line.endswith("\n") else ""
