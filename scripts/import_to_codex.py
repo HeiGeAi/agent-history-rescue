@@ -403,14 +403,15 @@ def main() -> int:
         extra.append(f"{failed} failed")
     print(f"\nImported {written} conversation(s) into Codex" + (f" ({', '.join(extra)})" if extra else "") + ".")
     print(f"Session index rows added: {indexed}")
-    print("Restart Codex desktop to see them in the sidebar.")
+    if written:
+        print("Restart Codex desktop to see them in the sidebar.")
     if written_files:
         print(
             f"\nTo roll back: restore {db_path.name} and session_index.jsonl "
             f"from {backup_dir}, then delete the rollout files"
         )
         print(f"listed in {listing}")
-    return 0
+    return 1 if failed else 0
 
 
 if __name__ == "__main__":
