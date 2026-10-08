@@ -145,7 +145,7 @@ class CodexRepairTests(unittest.TestCase):
             ), mock.patch.object(
                 sys, "argv", [str(IMPORT_SCRIPT), str(job), "--apply"]
             ), contextlib.redirect_stdout(io.StringIO()):
-                self.assertEqual(module.main(), 0)
+                self.assertEqual(module.main(), 1)
 
             self.assertEqual(list((home / "sessions").rglob("*.jsonl")), [])
             self.assertEqual(list(home.rglob(".*.tmp-*")), [])
