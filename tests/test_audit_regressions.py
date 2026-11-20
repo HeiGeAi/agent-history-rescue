@@ -44,10 +44,12 @@ class AuditRegressions(unittest.TestCase):
                 home = Path(tmp); path = home/'sessions/test.jsonl';path.parent.mkdir()
                 data = {'payload': {'model_provider': 'old'}, 'type': 'session_meta'}
                 line = json.dumps(data, separators=(',', separator))+'\n'
-                path.write_text(line+'[]\nnull\ninvalid\n')
+                invalid = json.dumps({'type': 'session_meta', 'payload': {'model_provider': ['invalid']}})
+                suffix = invalid + '\n[]\nnull\ninvalid\n'
+                path.write_text(line + suffix)
                 backup=home/'backup';backup.mkdir()
                 self.assertEqual(module.jsonl_provider_counts([path], {'old'}), {'old': 1})
                 self.assertEqual(module.patch_jsonl([path], {'old'}, 'new', home, backup), 1)
                 self.assertEqual(json.loads(path.read_text().splitlines()[0])['payload']['model_provider'], 'new')
-                self.assertTrue(path.read_text().endswith('[]\nnull\ninvalid\n'))
+                self.assertTrue(path.read_text().endswith(suffix))
                 self.assertEqual(module.jsonl_provider_counts([path], {'new'}), {'new': 1})

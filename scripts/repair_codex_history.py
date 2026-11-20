@@ -258,7 +258,7 @@ def jsonl_provider_counts(files: list, providers: set) -> dict:
                         if isinstance(item, dict) and item.get("type") == "session_meta"
                         and isinstance(item.get("payload"), dict) else None
                     )
-                    if provider in counts:
+                    if isinstance(provider, str) and provider in counts:
                         counts[provider] += 1
         except OSError:
             continue
@@ -426,7 +426,8 @@ def patch_jsonl(files, sources, target, codex_home, backup_dir) -> int:
                     item = None
                 if isinstance(item, dict) and item.get("type") == "session_meta":
                     payload = item.get("payload") or {}
-                    if isinstance(payload, dict) and payload.get("model_provider") in sources:
+                    provider = payload.get("model_provider") if isinstance(payload, dict) else None
+                    if isinstance(provider, str) and provider in sources:
                         payload["model_provider"] = target
                         item["payload"] = payload
                         newline = "\n" if line.endswith("\n") else ""
