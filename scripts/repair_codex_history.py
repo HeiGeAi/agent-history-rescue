@@ -226,7 +226,7 @@ def infer_target(config: dict, explicit, summary: dict) -> str:
 
 def source_providers(summary: dict, target: str, explicit) -> list:
     if explicit:
-        return sorted(set(explicit))
+        return sorted({p for p in explicit if p and p != target})
     providers = {row.get("model_provider") for row in summary["groups"] if row.get("model_provider")}
     return sorted(p for p in providers if p != target)
 

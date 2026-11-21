@@ -37,7 +37,7 @@ const { execFileSync, spawnSync } = require('child_process');
 // Tiny ANSI helpers (no dependency). Disabled when not a TTY or NO_COLOR set.
 // ---------------------------------------------------------------------------
 const useColor = process.stdout.isTTY && !process.env.NO_COLOR;
-const c = (code, s) => (useColor ? `[${code}m${s}[0m` : s);
+const c = (code, s) => (useColor ? `\x1b[${code}m${s}\x1b[0m` : s);
 const bold = (s) => c('1', s);
 const dim = (s) => c('2', s);
 const green = (s) => c('32', s);
@@ -45,8 +45,34 @@ const yellow = (s) => c('33', s);
 const red = (s) => c('31', s);
 const cyan = (s) => c('36', s);
 
+// Temp paths to best-effort clean up on exit/error/Ctrl-C (they may hold content).
+const _tempPaths = new Set();
+function cleanupTemps() {
+  for (const p of _tempPaths) {
+    try { fs.rmSync(p, { recursive: true, force: true }); } catch { /* ignore */ }
+  }
+  _tempPaths.clear();
+}
+process.on('SIGINT', () => { cleanupTemps(); process.exit(130); });
+process.on('SIGTERM', () => { cleanupTemps(); process.exit(143); });
+
 function log(...a) { console.log(...a); }
-function fail(msg) { console.error(red('Error: ') + msg); process.exit(1); }
+function fail(msg) { cleanupTemps(); console.error(red('Error: ') + msg); process.exit(1); }
+
+function requireOptionValue(argv, index, flag, { isPath = false } = {}) {
+  const val = argv[index + 1];
+  if (val === undefined || val === '' || (val.startsWith('-') && !(isPath && fs.existsSync(val)))) {
+    fail(`Option ${flag} requires a value.`);
+  }
+  return val;
+}
+
+function validateWorkspaceId(wsId) {
+  if (!wsId || wsId === '.' || wsId === '..' || /[/\\]/.test(wsId)) {
+    fail(`Invalid --target-workspace value: ${wsId}`);
+  }
+  return wsId;
+}
 
 function isDir(p) { try { return fs.statSync(p).isDirectory(); } catch { return false; } }
 function safeReaddir(p) { try { return fs.readdirSync(p); } catch { return []; } }
@@ -297,9 +323,9 @@ function parseClaudeFlags(argv) {
     else if (a === '--force') flags.force = true;
     else if (a === '--yes' || a === '-y') flags.yes = true;
     else if (a === '--list' || a === '-l') flags.list = true;
-    else if (a === '--restore') flags.restore = argv[++i];
-    else if (a === '--sessions-dir') flags.sessionsDir = argv[++i];
-    else if (a === '--target-workspace') flags.targetWorkspace = argv[++i];
+    else if (a === '--restore') { flags.restore = requireOptionValue(argv, i, a, { isPath: true }); i++; }
+    else if (a === '--sessions-dir') { flags.sessionsDir = requireOptionValue(argv, i, a, { isPath: true }); i++; }
+    else if (a === '--target-workspace') { flags.targetWorkspace = validateWorkspaceId(requireOptionValue(argv, i, a)); i++; }
     else if (a === '--help' || a === '-h') { printClaudeHelp(); process.exit(0); }
     else fail(`Unknown claude option: ${a}  (try: agent-history-rescue claude --help)`);
   }
@@ -352,7 +378,7 @@ function restoreCodex(backupDir, home) {
   let restored = 0;
   for (const f of safeReaddir(backupDir)) {
     const src = path.join(backupDir, f);
-    if (f === 'rollout-jsonl' || isDir(src)) continue;
+    if (f === 'rollout-jsonl' || f === 'imported-rollouts.txt' || isDir(src)) continue;
     const dest = path.join(home, f);
     if (f.endsWith('.sqlite')) {
       // Delete stale WAL/SHM first: a leftover WAL would be replayed onto the
@@ -379,10 +405,10 @@ async function runCodex(argv) {
     else if (a === '--unarchive') f.unarchive = true;
     else if (a === '--force') f.force = true;
     else if (a === '--yes' || a === '-y') f.yes = true;
-    else if (a === '--codex-home') f.codexHome = argv[++i];
-    else if (a === '--target-provider') f.targetProvider = argv[++i];
-    else if (a === '--source-provider') f.sources.push(argv[++i]);
-    else if (a === '--restore') f.restore = argv[++i];
+    else if (a === '--codex-home') { f.codexHome = requireOptionValue(argv, i, a, { isPath: true }); i++; }
+    else if (a === '--target-provider') { f.targetProvider = requireOptionValue(argv, i, a); i++; }
+    else if (a === '--source-provider') { f.sources.push(requireOptionValue(argv, i, a)); i++; }
+    else if (a === '--restore') { f.restore = requireOptionValue(argv, i, a, { isPath: true }); i++; }
     else if (a === '--help' || a === '-h') { printCodexHelp(); return; }
     else fail(`Unknown codex option: ${a}  (try: agent-history-rescue codex --help)`);
   }
@@ -441,12 +467,6 @@ function slugify(s, n = 48) {
     .replace(/^[-.]+|-+$/g, '').slice(0, n).replace(/^[-.]+/, '') || 'untitled';
 }
 function pad4(i) { return String(i).padStart(4, '0'); }
-
-// Temp paths to best-effort clean up, including on Ctrl-C (they may hold content).
-const _tempPaths = new Set();
-function cleanupTemps() { for (const p of _tempPaths) { try { fs.rmSync(p, { recursive: true, force: true }); } catch { /* ignore */ } } }
-process.on('SIGINT', () => { cleanupTemps(); process.exit(130); });
-process.on('SIGTERM', () => { cleanupTemps(); process.exit(143); });
 
 function extractZip(zipPath, destDir) {
   fs.mkdirSync(destDir, { recursive: true });
@@ -751,18 +771,19 @@ async function runImport(argv) {
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === '--to') {
-      const v = argv[++i];
+      const v = requireOptionValue(argv, i, a);
+      i++;
       if (v === 'all') f.to = ['claude', 'codex'];
       else if (v === 'claude' || v === 'codex') f.to.push(v);
       else fail(`Unknown --to target: ${v}  (expected: claude, codex, or all)`);
     }
-    else if (a === '--out') f.out = argv[++i];
+    else if (a === '--out') { f.out = requireOptionValue(argv, i, a, { isPath: true }); i++; }
     else if (a === '--dry-run' || a === '-n') f.dryRun = true;
     else if (a === '--yes' || a === '-y') f.yes = true;
     else if (a === '--force') f.force = true;
     else if (a === '--no-archive') f.noArchive = true;
-    else if (a === '--codex-provider') f.codexProvider = argv[++i];
-    else if (a === '--codex-home') f.codexHome = argv[++i];
+    else if (a === '--codex-provider') { f.codexProvider = requireOptionValue(argv, i, a); i++; }
+    else if (a === '--codex-home') { f.codexHome = requireOptionValue(argv, i, a, { isPath: true }); i++; }
     else if (a === '--help' || a === '-h') { printImportHelp(); return; }
     else if (!a.startsWith('-') && !f.src) f.src = a;
     else fail(`Unknown import option: ${a}  (try: agent-history-rescue import --help)`);

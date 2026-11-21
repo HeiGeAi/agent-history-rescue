@@ -1,13 +1,19 @@
 import contextlib
 import io
 import json
+import os
+import shutil
 import sqlite3
+import subprocess
 import sys
 import tempfile
 import unittest
+import zipfile
 from pathlib import Path
 from unittest import mock
-from test_codex_repair import load_script, IMPORT_SCRIPT, SCRIPT
+from test_codex_repair import load_script, IMPORT_SCRIPT, ROOT, SCRIPT
+
+NODE_CLI = ROOT / "bin" / "agent-history-rescue.js"
 
 
 class AuditRegressions(unittest.TestCase):
@@ -53,3 +59,100 @@ class AuditRegressions(unittest.TestCase):
                 self.assertEqual(json.loads(path.read_text().splitlines()[0])['payload']['model_provider'], 'new')
                 self.assertTrue(path.read_text().endswith(suffix))
                 self.assertEqual(module.jsonl_provider_counts([path], {'new'}), {'new': 1})
+
+    def test_explicit_source_provider_equal_to_target_is_noop(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / ".codex"
+            home.mkdir()
+            db_path = home / "state_5.sqlite"
+            with sqlite3.connect(db_path) as conn:
+                conn.execute(
+                    "create table threads (id text primary key, model_provider text, archived integer)"
+                )
+                conn.execute("insert into threads values ('t1', 'openai', 0)")
+                conn.commit()
+            res = subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPT),
+                    "--codex-home",
+                    str(home),
+                    "--target-provider",
+                    "openai",
+                    "--source-provider",
+                    "openai",
+                    "--apply",
+                ],
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+            self.assertIn("Nothing to repair", res.stdout)
+            self.assertFalse((home / "backups").exists())
+
+    def test_node_cli_rejects_missing_option_values_and_traversal_workspace(self):
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("node not installed")
+        with tempfile.TemporaryDirectory() as tmp:
+            env = {**os.environ, "HOME": tmp, "CODEX_HOME": str(Path(tmp) / ".codex"), "NO_COLOR": "1"}
+            bad_invocations = [
+                ["claude", "--sessions-dir"],
+                ["claude", "--restore"],
+                ["claude", "--target-workspace"],
+                ["claude", "--target-workspace", "../escape"],
+                ["claude", "--target-workspace", "a/b"],
+                ["codex", "--codex-home"],
+                ["codex", "--codex-home", "--dry-run"],
+                ["codex", "--target-provider"],
+                ["codex", "--source-provider"],
+                ["codex", "--restore"],
+                ["import", "--to"],
+                ["import", "--out"],
+                ["import", "--codex-home"],
+                ["import", "--codex-provider"],
+            ]
+            for args in bad_invocations:
+                with self.subTest(args=args):
+                    res = subprocess.run(
+                        [node, str(NODE_CLI), *args],
+                        env=env,
+                        capture_output=True,
+                        text=True,
+                    )
+                    self.assertNotEqual(res.returncode, 0, res.stdout + res.stderr)
+                    self.assertIn("Error:", res.stderr)
+
+    def test_node_cli_cleans_temp_dir_on_failed_zip_import(self):
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("node not installed")
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_root = Path(tmp)
+            scratch = tmp_root / "tmp"
+            scratch.mkdir()
+            bad_zip = tmp_root / "not-a-claude-export.zip"
+            with zipfile.ZipFile(bad_zip, "w") as zf:
+                zf.writestr("unrelated.txt", "hello")
+            env = {
+                **os.environ,
+                "HOME": str(tmp_root / "home"),
+                "TMPDIR": str(scratch),
+                "TEMP": str(scratch),
+                "TMP": str(scratch),
+                "NO_COLOR": "1",
+            }
+            res = subprocess.run(
+                [node, str(NODE_CLI), "import", str(bad_zip)],
+                env=env,
+                capture_output=True,
+                text=True,
+            )
+            self.assertNotEqual(res.returncode, 0)
+            self.assertIn("no conversations.json found", res.stderr)
+            self.assertEqual(list(scratch.glob("ahr-import-*")), [])
+
+    def test_node_cli_ansi_helper_includes_escape_byte(self):
+        source = NODE_CLI.read_text(encoding="utf-8")
+        self.assertIn(r"\x1b[${code}m${s}\x1b[0m", source)
+        self.assertNotIn("`[${code}m${s}[0m`", source)
